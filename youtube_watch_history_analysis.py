@@ -79,7 +79,11 @@ def read_parsed_data():
     return watch_history_df
 
 def get_yt_metadata(url):
-    ydl_opts = {'quiet': True, 'skip_download': True}
+    ydl_opts = {
+    'quiet': True,
+    'skip_download': True,
+    'js_runtimes': 'node:C:\\Program Files\\nodejs\\node.exe',
+    }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -108,7 +112,6 @@ def get_yt_metadata(url):
             }
     except Exception as e:
         return {'error': str(e), 'url': url}
-
 
 def scrape_with_resume(urls, output_file='data/video_metadata.jsonl', delay=1):
     # Load already-processed URLs

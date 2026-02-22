@@ -210,3 +210,4 @@ data/*.csv
 data/*.xlsx
 data/*.html
 data/*.json
+data/*.jsonl
