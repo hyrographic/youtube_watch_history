@@ -1,15 +1,19 @@
-import itertools
 import pandas as pd
+import numpy as np
+
 from datetime import datetime
-import re
-import json
-from bs4 import BeautifulSoup as bs4
+
 from pathlib import Path
+import itertools
+import time
+from typing import Literal
+import re
 import lxml
 from tqdm import tqdm
-import numpy as np
+import json
+
+from bs4 import BeautifulSoup as bs4
 import yt_dlp
-import time
 
 import seaborn as sns
 from matplotlib import pyplot as plt
@@ -78,6 +82,20 @@ def read_parsed_data():
     print(f'Number of rows remaining: {len(watch_history_df)}')
     return watch_history_df
 
+def filter_by_media(df, selected_media: Literal['watch', 'playables', 'post']):
+    media_types = ['watch', 'playables', 'post']
+    media_types.pop(media_types.index(selected_media))
+    non_cols = [c for c in df.columns if any([media_types[0] in c, media_types[1] in c]) & ('_' in c)]
+    filtered = df.dropna(subset=[f'{selected_media}_link']).drop(columns=non_cols)
+    return filtered
+
+def filter_by_date(df, year, month, day):
+    date_start = (year, month, day)
+    aged_data_i = df[df['date'] < datetime(*date_start)].index
+    df.drop(index=aged_data_i, inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    return
+
 def get_yt_metadata(url):
     ydl_opts = {
     'quiet': True,
@@ -140,50 +158,84 @@ def scrape_with_resume(urls, output_file='data/video_metadata.jsonl', delay=1):
 
     print('Complete')
 
+def read_metadata(paths: list):
+    metadata_lines = []
+    for path in paths:
+        fp = Path(path).resolve()
+        with open(fp) as f:
+            metadata_lines.extend([json.loads(line) for line in f])
+    metadata = pd.DataFrame(metadata_lines)
+    return metadata
+
+def metadata_group_errors(df):
+    error_type_regex = (
+        '(Sign in to confirm you’re not a bot|'
+        'live stream recording is not available|'
+        'available in your country|'
+        'members-only content|'
+        'violating YouTube|'
+        'video is not available|'
+        'Video unavailable|'
+        'confirm your age|'
+        'copyright claim|'
+        'video has been terminated|'
+        'Private video)'
+    )
+
+    df['error_type'] = df['error'].str.extract(error_type_regex)
+    print('Error breakdown', df['error_type'].value_counts())
+    print('\nUngrouped errors: ')
+    print(df[df['error_type'].isna()]['error'].value_counts(dropna=False))
+    return
+
 #! ====== RUN ======
-# ====== read html data ======
-data_paths = [
-    'data/watch-history-a1.html',
-    'data/watch-history-a2.html',
-    'data/watch-history-b1.html'
-]
-read_html_files(paths=data_paths, save_json='y')
-# ====== read JSON data ======
-all_activities_df = read_parsed_data()
+if __name__ == "main":
+    # ====== read html data ======
+    data_paths = [
+        'data/watch-history-a1.html',
+        'data/watch-history-a2.html',
+        'data/watch-history-b1.html'
+    ]
+    read_html_files(paths=data_paths, save_json='y')
+    # ====== read JSON data ======
+    all_activities_df = read_parsed_data()
 
-# filter for watch data only
-non_watch_cols = [c for c in all_activities_df.columns if any(['playables' in c, 'post' in c]) & ('_' in c)]
-watch_history_df = all_activities_df.dropna(subset=['watch_link']).drop(columns=non_watch_cols)
+    # filter for watch data only
+    non_watch_cols = [c for c in all_activities_df.columns if any(['playables' in c, 'post' in c]) & ('_' in c)]
+    watch_history_df = all_activities_df.dropna(subset=['watch_link']).drop(columns=non_watch_cols)
 
-# filter for year where bulk of data is
-date_start = (2023, 1, 11)
-aged_data_i = watch_history_df[watch_history_df['date'] < datetime(*date_start)].index
-watch_history_df.drop(index=aged_data_i, inplace=True)
-watch_history_df.reset_index(drop=True, inplace=True)
+    # filter for year where bulk of data is
+    filter_by_date(watch_history_df, 2023, 1, 11)
 
-# get video meta data
-urls = watch_history_df['watch_link'].dropna().unique().tolist()
-scrape_with_resume(urls, output_file='data/video_metadata.jsonl', delay=0.5)
+    # get video meta data
+    # urls = watch_history_df['watch_link'].dropna().unique().tolist()
+    # scrape_with_resume(urls, output_file='data/video_metadata.jsonl', delay=0.5)
 
-# ====== basic stats ======
+    # read video meta data
+    metadata_paths = [
+        'data/video_metadata.jsonl'
+    ]
+    metadata_df = read_metadata(metadata_paths)
+    metadata_group_errors(metadata_df)
 
-#? ====== timeseries ======
-gper = pd.Grouper('date', freq='D')
-watches_series = watch_history_df.set_index('date').groupby(gper)['watch_link'].nunique()
+    # metadata_df.info()
 
-fig, ax = plt.subplots(figsize=(15, 5))
-ax.bar(x=watches_series.index, height=watches_series.values, width=3)
-plt.xticks(rotation=90)
-plt.show()
+    # ====== basic stats ======
 
-#? ====== time of day ======
-hr_ = watch_history_df['date'].dt.hour
-watches_by_tod = watch_history_df.groupby(hr_)['watch_link'].nunique()
+    #? ====== timeseries ======
+    gper = pd.Grouper('date', freq='D')
+    watches_series = watch_history_df.set_index('date').groupby(gper)['watch_link'].nunique()
 
-fig, ax = plt.subplots(figsize=(15, 5))
-watches_by_tod.plot.barh(x='date', y='watch_link')
-plt.xticks(rotation=90)
-plt.show()
+    fig, ax = plt.subplots(figsize=(15, 5))
+    ax.bar(x=watches_series.index, height=watches_series.values, width=3)
+    plt.xticks(rotation=90)
+    plt.show()
 
-# ====== nlp titles ======
-watch_history_df
+    #? ====== time of day ======
+    hr_ = watch_history_df['date'].dt.hour
+    watches_by_tod = watch_history_df.groupby(hr_)['watch_link'].nunique()
+
+    fig, ax = plt.subplots(figsize=(15, 5))
+    watches_by_tod.plot.barh(x='date', y='watch_link')
+    plt.xticks(rotation=90)
+    plt.show()
