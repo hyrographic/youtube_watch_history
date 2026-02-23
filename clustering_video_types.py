@@ -26,7 +26,6 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sentence_transformers import SentenceTransformer
 
 import umap
-import numba
 
 # local imports
 from src import read_and_load_data
@@ -68,50 +67,43 @@ tags_data = mdata_nlp[(mdata_nlp['tags'].notna()) &(mdata_nlp['tags'].apply(len)
 tags = tags_data['tags'].str.join('; ')
 
 # ====== generate embeddings ======
-# sent_transformer = SentenceTransformer("all-MiniLM-L6-v2") # fast model
+# sent_transformer = {'all-MiniLM-L6-v2':SentenceTransformer("all-MiniLM-L6-v2")} # fast model
 # sent_transformer = SentenceTransformer("all-mpnet-base-v2") # slow model
 
-import torch_directml
-device = torch_directml.device()
-sent_transformer = SentenceTransformer("all-mpnet-base-v2", device=device)
+def create_transformer(model):
+    return SentenceTransformer(model)
 
-# - CATEGORY
-print('Category Embeddings...')
-_cat_emb = sent_transformer.encode(categories.values, batch_size=256, show_progress_bar=True)
-cat_embeddings = pd.DataFrame(_cat_emb, index=categories.index)
-_cats = categories.loc[cat_embeddings.index]
-print('Category Embeddings: ', cat_embeddings.shape)
+def encode_cached(m, transformer, values, file_name, index):
+    fp = f'data/embeddings_cache/{m}/{file_name}'
+    os.makedirs('/'.join(fp.split('/')[:-1]), exist_ok=True)
+    if os.path.exists(fp):
+        print(f'Loading cached {file_name}')
+        return pd.DataFrame(np.load(fp), index=index)
+    print(f'Encoding {file_name}...')
+    emb = transformer.encode(values, batch_size=256, show_progress_bar=True)
+    np.save(fp, emb)
+    return pd.DataFrame(emb, index=index)
 
-palette = sns.color_palette('tab20', 16)
-category_colours = {cat: palette[i] for i, cat in enumerate(_cats.unique())}
-category_cmap = _cats.map(category_colours)
+m = 'all-MiniLM-L6-v2' # fast model
+# m = 'all-mpnet-base-v2' #slow model
+sent_transformer = create_transformer(m)
 
-# - TITLE
-print('Title Embeddings...')
-_t_emb = sent_transformer.encode(titles.values, batch_size=256, show_progress_bar=True)
-title_embeddings = pd.DataFrame(_t_emb, index=titles.index)
+cat_embeddings = encode_cached(m, sent_transformer, categories.values, 'cat_emb.npy', categories.index)
+title_embeddings = encode_cached(m, sent_transformer, titles.values,'title_emb.npy', titles.index)
+desc_embeddings = encode_cached(m, sent_transformer, desc.values,'desc_emb.npy',  desc.index)
+tags_embeddings = encode_cached(m, sent_transformer, tags.values,'tags_emb.npy',  tags.index)
+
+print(f'cat={cat_embeddings.shape} title={title_embeddings.shape} desc={desc_embeddings.shape} tags={tags_embeddings.shape}')
+
 _cats = categories.loc[title_embeddings.index]
-print('Title Embeddings: ', title_embeddings.shape)
-
 palette = sns.color_palette('tab20', 16)
+category_colours = {cat: palette[i] for i, cat in enumerate(categories.unique())}
+category_cmap = categories.map(category_colours)
 title_colours = {cat: palette[i] for i, cat in enumerate(_cats.unique())}
 title_cmap = _cats.map(title_colours)
 
-# - DESC
-print('Description Embeddings...')
-_desc_emb = sent_transformer.encode(desc.values, batch_size=256, show_progress_bar=True)
-desc_embeddings = pd.DataFrame(_desc_emb, index=desc.index)
-_cats = categories.loc[desc_embeddings.index]
-print('Description Embeddings: ', desc_embeddings.shape)
-
-# - TAGS
-print('Tags Embeddings...')
-_tags_emb = sent_transformer.encode(tags.values, batch_size=256, show_progress_bar=True)
-tags_embeddings = pd.DataFrame(_tags_emb, index=tags.index)
-_cats = categories.loc[tags_embeddings.index]
-print('Tags Embeddings: ', tags_embeddings.shape)
-
 # ====== combine embeddings ======
+# ! OPTION 1
 w_tags = 1.0
 w_category = 1.25
 w_title = 2.0
@@ -131,6 +123,27 @@ combined_embeddings = (
     desc_embeddings.loc[common_idx]  * w_desc +
     tags_embeddings.loc[common_idx]  * w_tags
 ) / (w_category + w_title + w_desc + w_tags)
+
+# ! OPTION 2
+# w_tags = 1.0
+# w_category = 1.25
+# w_title = 2.0
+# w_desc  = 1.0
+
+# # Intersect indices so every row has all four embeddings present.
+# # reindex + += propagates NaN: any video missing one feature silently becomes all-NaN.
+# common_idx = (cat_embeddings.index
+#               .intersection(title_embeddings.index)
+#               .intersection(desc_embeddings.index)
+#               .intersection(tags_embeddings.index))
+# print(f'Videos with all embeddings: {len(common_idx)} / {len(mdata_nlp)}')
+
+# combined_embeddings = (
+#     cat_embeddings.loc[common_idx]   * w_category +
+#     title_embeddings.loc[common_idx] * w_title +
+#     desc_embeddings.loc[common_idx]  * w_desc +
+#     tags_embeddings.loc[common_idx]  * w_tags
+# ) / (w_category + w_title + w_desc + w_tags)
 
 # ====== UMAP dimensionality reduction ======
 # - TITLE
