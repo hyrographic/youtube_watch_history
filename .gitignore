@@ -215,3 +215,5 @@ data/*.jsonl
 *.af~lock~
 
 charts/frames*
+
+www.youtube.com_cookies.txt
