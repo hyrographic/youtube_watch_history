@@ -19,6 +19,7 @@ from matplotlib.font_manager import FontProperties
 from scipy.ndimage import gaussian_filter1d
 
 # local imports
+from importlib import reload
 from src import read_and_load_data
 
 # ====== read html data ======

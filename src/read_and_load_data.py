@@ -78,6 +78,9 @@ def read_parsed_data():
     duplicate_i = watch_history_df[watch_history_df.duplicated(subset=['date', 'watch_link'])].index
     watch_history_df.drop(index=duplicate_i, inplace=True)
     watch_history_df.reset_index(drop=True, inplace=True)
+
+    # add id column
+    watch_history_df['id'] = watch_history_df['watch_link'].apply(lambda x: np.nan if pd.isnull(x) else x.split('=')[-1])
     print(f'Dropped {len(duplicate_i)} duplicates')
     print(f'Number of rows remaining: {len(watch_history_df)}')
     return watch_history_df

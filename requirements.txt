@@ -9,3 +9,4 @@ lxml
 yt-dlp
 tqdm
 sentence-transformers
+umap-learn
