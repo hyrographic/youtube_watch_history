@@ -13,6 +13,9 @@ import matplotlib
 from matplotlib import pyplot as plt
 import matplotlib.ticker as ticker
 import matplotlib.dates as mdates
+from matplotlib import font_manager
+from matplotlib.font_manager import FontProperties
+
 from scipy.ndimage import gaussian_filter1d
 
 # local imports
@@ -54,6 +57,13 @@ watch_data.assign(m=watch_data['date'].dt.to_period('M')).groupby(['m', 'file'])
 # # x axis
 # plt.xticks(rotation=35)
 
+#* ====== FONT SETTINGS ======
+yt_sans_bold = Path('resources/fonts/YouTubeSansBold.otf').resolve()
+font_manager.fontManager.addfont(yt_sans_bold)
+LABEL = {'family': 'YouTube Sans', 'size': 14, 'weight':'bold'}
+
+#* ====== END ======
+
 
 #? ====== line timeseries ======
 def plot_timeline(colour=Literal['grey', 'red'], save=None):
@@ -66,7 +76,8 @@ def plot_timeline(colour=Literal['grey', 'red'], save=None):
         )
 
     fig, ax = plt.subplots(figsize=(20, 1.5), dpi=300)
-
+    fig.tight_layout()
+    
     # Break the line at each half year boundary
     half_years = pd.date_range(start=ws_smoothed.index.min(), end=ws_smoothed.index.max(), freq='6MS')
 
@@ -81,8 +92,7 @@ def plot_timeline(colour=Literal['grey', 'red'], save=None):
     ax.xaxis.set_major_locator(mdates.MonthLocator(bymonth=[1, 7]))
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
     for label in ax.get_xticklabels():
-        label.set_fontfamily('YouTube Sans Medium')
-        label.set_fontweight('bold')
+        label.set(**LABEL)
         label.set_ha('left')
     ax.tick_params(axis='x', length=0)
 
