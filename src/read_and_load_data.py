@@ -102,8 +102,9 @@ def filter_by_date(df, year, month, day):
 def get_yt_metadata(url):
     ydl_opts = {
     'quiet': True,
+    'no_warnings': True,
     'skip_download': True,
-    'js_runtimes': 'node:C:\\Program Files\\nodejs\\node.exe',
+    'cookies':str(Path('../cookies/www.youtube.com_cookies.txt').resolve())
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
