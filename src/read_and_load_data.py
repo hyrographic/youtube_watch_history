@@ -66,7 +66,7 @@ def read_parsed_data():
     parsed_path = Path('data/watch_history_parsed.json').resolve()
     with open(parsed_path, 'r') as f:
         history_json = json.load(f)
-        print(f'Read {len(history_json)} lines')
+        print(f'Read {len(history_json)} lines of watch history data')
     
     history_df = pd.DataFrame(history_json)
     video_info_norm = pd.json_normalize(history_df['video_info']).rename(columns=lambda x: x.replace('.', '_'))
@@ -169,6 +169,7 @@ def read_metadata(paths: list):
         with open(fp) as f:
             metadata_lines.extend([json.loads(line) for line in f])
     metadata = pd.DataFrame(metadata_lines)
+    print(f'Read {len(metadata)} lines of video metadata')
     return metadata
 
 def metadata_group_errors(df):
