@@ -211,3 +211,5 @@ data/*.xlsx
 data/*.html
 data/*.json
 data/*.jsonl
+
+*.af~lock~
