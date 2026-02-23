@@ -217,3 +217,5 @@ data/*.jsonl
 charts/frames*
 
 www.youtube.com_cookies.txt
+
+data/embeddings_cache
