@@ -137,15 +137,22 @@ ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.05),
           ncol=4, frameon=False)
 
 # ====== UMAP Animation ======
-def render_frames(df, umapped, combined_embeddings, categories, 
-                  title_colours, output_dir, n_transition_frames=25):
-    
+def render_frames(df, umapped, combined_embeddings, categories,title_colours, output_dir, n_transition_frames=10, window_size=2):
+    """
+    window_size: number of consecutive periods visible at once.
+      For any frame showing 'current' period i, a point from period p has:
+        offset = i - p
+        offset = -1  → dim preview (appears 1 week before its recorded date)
+        offset =  0  → full brightness (recorded date)
+        offset 1..window_size-2 → linear fade toward 0
+        offset >= window_size-1 → invisible
+    """
     print('Number of df activities in umapped values: ', len(df[df['id'].isin(combined_embeddings.index)]))
 
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
-    
+
     periods = sorted(df['date'].dt.to_period('W').unique())
     frame_idx = 0
 
@@ -157,6 +164,12 @@ def render_frames(df, umapped, combined_embeddings, categories,
     for spine in ax.spines.values():
         spine.set_visible(False)
 
+    # Fix axis limits to the full UMAP extent so every frame has the same coordinate system.
+    # Without this, matplotlib auto-scales per frame and the view shifts → misalignment.
+    pad = 0.5
+    ax.set_xlim(umapped[:, 0].min() - pad, umapped[:, 0].max() + pad)
+    ax.set_ylim(umapped[:, 1].min() - pad, umapped[:, 1].max() + pad)
+
     # Static background
     # ax.scatter(umapped[:,0], umapped[:,1], c=umapped_colors, s=10, alpha=0.05, linewidths=0)
 
@@ -164,56 +177,89 @@ def render_frames(df, umapped, combined_embeddings, categories,
     ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.02),
               ncol=4, frameon=False)
 
-    def draw_frame(month_umapped, month_colors, alpha):
-        # Remove previous highlights
-        while len(ax.collections) > 2:  # keep background + legend
-            ax.collections[-1].remove()
-
-        if len(month_umapped) == 0:
-            return
-
-        # Glow layers
-        for size, glow_alpha in [(200, 0.02), (100, 0.05), (50, 0.1), (20, 0.3)]:
-            ax.scatter(month_umapped[:,0], month_umapped[:,1],
-                      s=size, alpha=glow_alpha * alpha, 
-                      color=month_colors, linewidths=0, zorder=3)
-        # Core points
-        ax.scatter(month_umapped[:,0], month_umapped[:,1],
-                  s=15, alpha=alpha, color=month_colors, 
-                  linewidths=0, zorder=4)
-
-    def get_month_data(period):
+    # Pre-cache per-period UMAP data so we don't re-query the DataFrame each frame
+    period_data = []
+    for period in periods:
         month_ids = df[df['date'].dt.to_period('W') == period]['id'].unique()
         mask = combined_embeddings.index.isin(month_ids)
         period_umapped = umapped[mask]
         period_colors = categories.loc[mask].map(title_colours).values
+        period_data.append((period_umapped, period_colors))
         print(f'period: {period}, umapped embedding values: {len(period_umapped)}')
-        return period_umapped, period_colors
+
+    def get_alpha_for_offset(offset):
+        """
+        offset = current_period_idx - point_period_idx
+          -1  : dim preview (1 week before recorded date)
+           0  : full brightness (recorded date)
+          1..window_size-2 : linear fade from 1.0 toward 0
+          >= window_size-1 : invisible
+        """
+        if offset == -1:
+            return 0.25
+        if offset == 0:
+            return 1.0
+        if 1 <= offset < window_size - 1:
+            return 1.0 - offset / (window_size - 1)
+        return 0.0
+
+    def draw_rolling_frame(current_idx, progress=0.0):
+        """
+        Draw the rolling window centred on current_idx.
+        progress in [0, 1] smoothly interpolates toward current_idx + 1,
+        so each point's alpha lerps between its alpha at the current step
+        and its alpha at the next step (offset increases by 1).
+        progress=1.0 is identical to draw_rolling_frame(current_idx + 1, 0.0).
+        """
+        # Ease-in-out so the motion accelerates out of a hold and decelerates into the next
+        progress = (1 - np.cos(progress * np.pi)) / 2
+        while ax.collections:
+            ax.collections[-1].remove()
+
+        # Periods that can be visible at current_idx or current_idx+1
+        p_lo = max(0, current_idx - (window_size - 2))
+        p_hi = min(len(periods), current_idx + 2)  # +1 preview, +1 for next-step preview
+
+        for p_idx in range(p_lo, p_hi):
+            offset = current_idx - p_idx
+            alpha = (1 - progress) * get_alpha_for_offset(offset) \
+                  + progress       * get_alpha_for_offset(offset + 1)
+
+            if alpha <= 0:
+                continue
+
+            p_umapped, p_colors = period_data[p_idx]
+            if len(p_umapped) == 0:
+                continue
+
+            # Glow layers
+            for size, glow_alpha in [(200, 0.02), (100, 0.05), (50, 0.1), (20, 0.3)]:
+                ax.scatter(p_umapped[:, 0], p_umapped[:, 1],
+                           s=size, alpha=glow_alpha * alpha,
+                           color=p_colors, linewidths=0, zorder=3)
+            # Core points
+            ax.scatter(p_umapped[:, 0], p_umapped[:, 1],
+                       s=15, alpha=alpha, color=p_colors,
+                       linewidths=0, zorder=4)
 
     for i, period in tqdm(enumerate(periods)):
-        # t = pd.Period('2025-10-13/2025-10-19', 'W-SUN')
-        period_umapped, period_colors = get_month_data(period)
-        # Fade in
+        # Smooth slide from period i-1 → i.
+        # progress goes 0 → 1 inclusive so the last transition frame is identical
+        # to the first hold frame — no discontinuity.
+        steps = max(n_transition_frames - 1, 1)
         for t in range(n_transition_frames):
-            alpha = t / n_transition_frames
-            draw_frame(period_umapped, period_colors, alpha)
-            # display(fig)
-            fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png', 
-                       bbox_inches='tight', transparent=True)
+            raw_progress = t / steps
+            if i == 0:
+                draw_rolling_frame(0, progress=0.0)
+            else:
+                draw_rolling_frame(i - 1, progress=raw_progress)
+            fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png', transparent=True)
             frame_idx += 1
 
-        # Hold for 20 frames
+        # Hold on this period
         for _ in range(20):
-            fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png',
-                       bbox_inches='tight', transparent=True)
-            frame_idx += 1
-
-        # Fade out
-        for t in range(n_transition_frames):
-            alpha = 1 - (t / n_transition_frames)
-            draw_frame(period_umapped, period_colors, alpha)
-            fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png',
-                       bbox_inches='tight', transparent=True)
+            draw_rolling_frame(i)
+            fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png', transparent=True)
             frame_idx += 1
 
         print(f'Rendered {period} ({frame_idx} frames total)')
