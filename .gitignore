@@ -213,3 +213,5 @@ data/*.json
 data/*.jsonl
 
 *.af~lock~
+
+charts/frames*
