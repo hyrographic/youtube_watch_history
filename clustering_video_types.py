@@ -65,8 +65,8 @@ desc_data = mdata_nlp[mdata_nlp['description'].notna()]
 desc = desc_data['description']
 
 # ====== generate embeddings ======
-sent_transformer = SentenceTransformer("all-MiniLM-L6-v2")
-# all-mpnet-base-v2
+# sent_transformer = SentenceTransformer("all-MiniLM-L6-v2") # fast model
+sent_transformer = SentenceTransformer("all-mpnet-base-v2") # slow model
 
 # - TITLE
 _t_emb = sent_transformer.encode(titles.values, batch_size=256, show_progress_bar=True)
@@ -92,16 +92,16 @@ combined_embeddings = (title_embeddings * w_title + desc_embeddings * w_desc) / 
 
 # ====== UMAP dimensionality reduction ======
 # - TITLE
-reducer_2D_title = umap.UMAP(n_components=2, random_state=42, min_dist=0.3, spread=10.0)
-reduced_title_emb = reducer_2D_title.fit_transform(title_embeddings)
+# reducer_2D_title = umap.UMAP(n_components=2, random_state=42, min_dist=0.3, spread=10.0)
+# reduced_title_emb = reducer_2D_title.fit_transform(title_embeddings)
 # reduced_title_emb = reducer_2D_title.transform(title_embeddings)
 
-plt.scatter(reduced_title_emb[:, 0],reduced_title_emb[:, 1], s=8, alpha=0.78, linewidths=0, color=c)
-plt.gca().set_aspect('equal', 'datalim')
-plt.title('UMAP', fontsize=24);
+# plt.scatter(reduced_title_emb[:, 0],reduced_title_emb[:, 1], s=8, alpha=0.78, linewidths=0, color=c)
+# plt.gca().set_aspect('equal', 'datalim')
+# plt.title('UMAP', fontsize=24);
 
 # ====== Get single month sample ======
-single_month = watch_data[watch_data['date'].dt.to_period('M') == '2025-04']
+single_month = watch_data[watch_data['date'].dt.to_period('M') == '2024-04']
 single_month_ids = single_month['id'].unique().tolist()
 mask = combined_embeddings.index.isin(single_month_ids)
 masked_cats = categories.loc[mask]
@@ -113,7 +113,7 @@ fit = umap.UMAP(
     n_neighbors=n_neighbors,
     min_dist=0.0,
     n_components=n_components,
-    metric='cosine'
+    metric='correlation'
 )
 umapped = fit.fit_transform(combined_embeddings);
 umapped_colors = categories.map(title_colours)
@@ -122,15 +122,12 @@ umapped_month = umapped[mask]
 month_colors = masked_cats.map(title_colours)
 
 fig = plt.figure(figsize=(19, 10), dpi=300)
-if n_components == 1:
-    ax = fig.add_subplot(111)
-    ax.scatter(umapped[:,0], range(len(umapped)), c=umapped_colors, s=5)
 if n_components == 2:
     ax = fig.add_subplot(111)
-    ax.scatter(umapped[:,0], umapped[:,1], c=umapped_colors, s=10, alpha=1)
+    ax.scatter(umapped_month[:,0], umapped_month[:,1], c=month_colors, s=10, alpha=1)
 if n_components == 3:
     ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(umapped[:,0], umapped[:,1], umapped[:,2], c=umapped_colors, s=5)
+    ax.scatter(umapped_month[:,0], umapped_month[:,1], umapped_month[:,2], c=month_colors, s=5)
 
 handles = [Patch(color=title_colours[cat], label=cat) for cat in title_colours]
 ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.05),
