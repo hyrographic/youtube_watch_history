@@ -69,9 +69,14 @@ tags = tags_data['tags'].str.join('; ')
 
 # ====== generate embeddings ======
 # sent_transformer = SentenceTransformer("all-MiniLM-L6-v2") # fast model
-sent_transformer = SentenceTransformer("all-mpnet-base-v2") # slow model
+# sent_transformer = SentenceTransformer("all-mpnet-base-v2") # slow model
+
+import torch_directml
+device = torch_directml.device()
+sent_transformer = SentenceTransformer("all-mpnet-base-v2", device=device)
 
 # - CATEGORY
+print('Category Embeddings...')
 _cat_emb = sent_transformer.encode(categories.values, batch_size=256, show_progress_bar=True)
 cat_embeddings = pd.DataFrame(_cat_emb, index=categories.index)
 _cats = categories.loc[cat_embeddings.index]
@@ -82,6 +87,7 @@ category_colours = {cat: palette[i] for i, cat in enumerate(_cats.unique())}
 category_cmap = _cats.map(category_colours)
 
 # - TITLE
+print('Title Embeddings...')
 _t_emb = sent_transformer.encode(titles.values, batch_size=256, show_progress_bar=True)
 title_embeddings = pd.DataFrame(_t_emb, index=titles.index)
 _cats = categories.loc[title_embeddings.index]
@@ -92,12 +98,14 @@ title_colours = {cat: palette[i] for i, cat in enumerate(_cats.unique())}
 title_cmap = _cats.map(title_colours)
 
 # - DESC
+print('Description Embeddings...')
 _desc_emb = sent_transformer.encode(desc.values, batch_size=256, show_progress_bar=True)
 desc_embeddings = pd.DataFrame(_desc_emb, index=desc.index)
 _cats = categories.loc[desc_embeddings.index]
 print('Description Embeddings: ', desc_embeddings.shape)
 
 # - TAGS
+print('Tags Embeddings...')
 _tags_emb = sent_transformer.encode(tags.values, batch_size=256, show_progress_bar=True)
 tags_embeddings = pd.DataFrame(_tags_emb, index=tags.index)
 _cats = categories.loc[tags_embeddings.index]
