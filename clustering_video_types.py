@@ -64,9 +64,22 @@ titles = title_data['title']
 desc_data = mdata_nlp[mdata_nlp['description'].notna()]
 desc = desc_data['description']
 
+tags_data = mdata_nlp[(mdata_nlp['tags'].notna()) &(mdata_nlp['tags'].apply(len) > 0)]
+tags = tags_data['tags'].str.join('; ')
+
 # ====== generate embeddings ======
 # sent_transformer = SentenceTransformer("all-MiniLM-L6-v2") # fast model
 sent_transformer = SentenceTransformer("all-mpnet-base-v2") # slow model
+
+# - CATEGORY
+_cat_emb = sent_transformer.encode(categories.values, batch_size=256, show_progress_bar=True)
+cat_embeddings = pd.DataFrame(_cat_emb, index=categories.index)
+_cats = categories.loc[cat_embeddings.index]
+print('Category Embeddings: ', cat_embeddings.shape)
+
+palette = sns.color_palette('tab20', 16)
+category_colours = {cat: palette[i] for i, cat in enumerate(_cats.unique())}
+category_cmap = _cats.map(category_colours)
 
 # - TITLE
 _t_emb = sent_transformer.encode(titles.values, batch_size=256, show_progress_bar=True)
@@ -80,15 +93,36 @@ title_cmap = _cats.map(title_colours)
 
 # - DESC
 _desc_emb = sent_transformer.encode(desc.values, batch_size=256, show_progress_bar=True)
-desc_embeddings = pd.DataFrame(_desc_emb, index=titles.index)
+desc_embeddings = pd.DataFrame(_desc_emb, index=desc.index)
 _cats = categories.loc[desc_embeddings.index]
 print('Description Embeddings: ', desc_embeddings.shape)
 
+# - TAGS
+_tags_emb = sent_transformer.encode(tags.values, batch_size=256, show_progress_bar=True)
+tags_embeddings = pd.DataFrame(_tags_emb, index=tags.index)
+_cats = categories.loc[tags_embeddings.index]
+print('Tags Embeddings: ', tags_embeddings.shape)
+
 # ====== combine embeddings ======
+w_tags = 1.0
+w_category = 1.25
 w_title = 2.0
 w_desc  = 1.0
 
-combined_embeddings = (title_embeddings * w_title + desc_embeddings * w_desc) / (w_title + w_desc)
+# Intersect indices so every row has all four embeddings present.
+# reindex + += propagates NaN: any video missing one feature silently becomes all-NaN.
+common_idx = (cat_embeddings.index
+              .intersection(title_embeddings.index)
+              .intersection(desc_embeddings.index)
+              .intersection(tags_embeddings.index))
+print(f'Videos with all embeddings: {len(common_idx)} / {len(mdata_nlp)}')
+
+combined_embeddings = (
+    cat_embeddings.loc[common_idx]   * w_category +
+    title_embeddings.loc[common_idx] * w_title +
+    desc_embeddings.loc[common_idx]  * w_desc +
+    tags_embeddings.loc[common_idx]  * w_tags
+) / (w_category + w_title + w_desc + w_tags)
 
 # ====== UMAP dimensionality reduction ======
 # - TITLE
@@ -133,11 +167,10 @@ if n_components == 3:
     ax.scatter(um[:,0], um[:,1], um[:,2], c=c, s=5)
 
 handles = [Patch(color=title_colours[cat], label=cat) for cat in title_colours]
-ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.05),
-          ncol=4, frameon=False)
+ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.05),ncol=4, frameon=False)
 
 # ====== UMAP Animation ======
-def render_frames(df, umapped, combined_embeddings, categories,title_colours, output_dir, n_transition_frames=10, window_size=2):
+def render_frames(df, umapped, combined_embeddings, categories, title_colours, output_dir, n_fade_in_frames=20, n_fade_out_frames=30, window_size=3):
     """
     window_size: number of consecutive periods visible at once.
       For any frame showing 'current' period i, a point from period p has:
@@ -146,6 +179,10 @@ def render_frames(df, umapped, combined_embeddings, categories,title_colours, ou
         offset =  0  → full brightness (recorded date)
         offset 1..window_size-2 → linear fade toward 0
         offset >= window_size-1 → invisible
+
+    n_fade_in_frames:  frames for a new period to rise from dim preview (offset -1) to full (offset 0)
+    n_fade_out_frames: frames for existing periods to advance one offset step (age / dim)
+    Total transition frames = max(n_fade_in_frames, n_fade_out_frames)
     """
     print('Number of df activities in umapped values: ', len(df[df['id'].isin(combined_embeddings.index)]))
 
@@ -203,16 +240,16 @@ def render_frames(df, umapped, combined_embeddings, categories,title_colours, ou
             return 1.0 - offset / (window_size - 1)
         return 0.0
 
-    def draw_rolling_frame(current_idx, progress=0.0):
+    def draw_rolling_frame(current_idx, progress_in=0.0, progress_out=0.0):
         """
         Draw the rolling window centred on current_idx.
-        progress in [0, 1] smoothly interpolates toward current_idx + 1,
-        so each point's alpha lerps between its alpha at the current step
-        and its alpha at the next step (offset increases by 1).
-        progress=1.0 is identical to draw_rolling_frame(current_idx + 1, 0.0).
+          progress_in  [0,1]: how far the incoming period (offset -1 → 0) has brightened
+          progress_out [0,1]: how far all existing periods (offset n → n+1) have aged/dimmed
+        Both reach 1.0 when their respective transition is complete.
         """
-        # Ease-in-out so the motion accelerates out of a hold and decelerates into the next
-        progress = (1 - np.cos(progress * np.pi)) / 2
+        p_in  = (1 - np.cos(progress_in  * np.pi)) / 2
+        p_out = (1 - np.cos(progress_out * np.pi)) / 2
+
         while ax.collections:
             ax.collections[-1].remove()
 
@@ -222,8 +259,11 @@ def render_frames(df, umapped, combined_embeddings, categories,title_colours, ou
 
         for p_idx in range(p_lo, p_hi):
             offset = current_idx - p_idx
-            alpha = (1 - progress) * get_alpha_for_offset(offset) \
-                  + progress       * get_alpha_for_offset(offset + 1)
+            # offset=-1 is the incoming preview — use progress_in
+            # offset>=0 are existing/aging periods — use progress_out
+            p = p_in if offset < 0 else p_out
+            alpha = (1 - p) * get_alpha_for_offset(offset) \
+                  + p       * get_alpha_for_offset(offset + 1)
 
             if alpha <= 0:
                 continue
@@ -233,34 +273,37 @@ def render_frames(df, umapped, combined_embeddings, categories,title_colours, ou
                 continue
 
             # Glow layers
-            for size, glow_alpha in [(200, 0.02), (100, 0.05), (50, 0.1), (20, 0.3)]:
+            for size, glow_alpha in [(350, 0.05), (150, 0.05), (100, 0.1), (50, 0.3)]:
                 ax.scatter(p_umapped[:, 0], p_umapped[:, 1],
                            s=size, alpha=glow_alpha * alpha,
                            color=p_colors, linewidths=0, zorder=3)
             # Core points
             ax.scatter(p_umapped[:, 0], p_umapped[:, 1],
-                       s=15, alpha=alpha, color=p_colors,
+                       s=50, alpha=alpha, color=p_colors,
                        linewidths=0, zorder=4)
 
+    steps_in  = max(n_fade_in_frames  - 1, 1)
+    steps_out = max(n_fade_out_frames - 1, 1)
+    n_transition_frames = max(n_fade_in_frames, n_fade_out_frames)
+
     for i, period in tqdm(enumerate(periods)):
-        # Smooth slide from period i-1 → i.
-        # progress goes 0 → 1 inclusive so the last transition frame is identical
-        # to the first hold frame — no discontinuity.
-        steps = max(n_transition_frames - 1, 1)
+        # Transition from period i-1 → i.
+        # Each progress independently clamps to 1.0 at its own rate.
         for t in range(n_transition_frames):
-            raw_progress = t / steps
             if i == 0:
-                draw_rolling_frame(0, progress=0.0)
+                draw_rolling_frame(0, progress_in=0.0, progress_out=0.0)
             else:
-                draw_rolling_frame(i - 1, progress=raw_progress)
+                p_in  = min(t / steps_in,  1.0)
+                p_out = min(t / steps_out, 1.0)
+                draw_rolling_frame(i - 1, progress_in=p_in, progress_out=p_out)
             fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png', transparent=True)
             frame_idx += 1
 
         # Hold on this period
-        for _ in range(20):
-            draw_rolling_frame(i)
-            fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png', transparent=True)
-            frame_idx += 1
+        # for _ in range(9):
+        #     draw_rolling_frame(i, progress_in=0.0, progress_out=0.0)
+        #     fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png', transparent=True)
+        #     frame_idx += 1
 
         print(f'Rendered {period} ({frame_idx} frames total)')
 
@@ -268,9 +311,12 @@ def render_frames(df, umapped, combined_embeddings, categories,title_colours, ou
     print(f'Done — {frame_idx} frames saved to {output_dir}/')
 
 render_frames(
-    df=watch_data[watch_data['date'].dt.to_period('M')<'2023-03'],
-    umapped=umapped, 
-    combined_embeddings=combined_embeddings, 
-    categories=categories, 
+    df=watch_data[watch_data['date'].dt.to_period('M')<'2024-01'],
+    umapped=umapped,
+    combined_embeddings=combined_embeddings,
+    categories=categories,
     title_colours=title_colours,
-    output_dir='charts/frames_v3')
+    output_dir='charts/frames_v3',
+    n_fade_in_frames=15,
+    n_fade_out_frames=15,
+)
