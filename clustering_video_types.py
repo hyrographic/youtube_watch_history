@@ -121,13 +121,16 @@ umapped_colors = categories.map(title_colours)
 umapped_month = umapped[mask]
 month_colors = masked_cats.map(title_colours)
 
+um = umapped
+c = umapped_colors
+
 fig = plt.figure(figsize=(19, 10), dpi=300)
 if n_components == 2:
     ax = fig.add_subplot(111)
-    ax.scatter(umapped_month[:,0], umapped_month[:,1], c=month_colors, s=10, alpha=1)
+    ax.scatter(um[:,0], um[:,1], c=c, s=10, alpha=1)
 if n_components == 3:
     ax = fig.add_subplot(111, projection='3d')
-    ax.scatter(umapped_month[:,0], umapped_month[:,1], umapped_month[:,2], c=month_colors, s=5)
+    ax.scatter(um[:,0], um[:,1], um[:,2], c=c, s=5)
 
 handles = [Patch(color=title_colours[cat], label=cat) for cat in title_colours]
 ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.05),
@@ -137,6 +140,8 @@ ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.05),
 def render_frames(df, umapped, combined_embeddings, categories, 
                   title_colours, output_dir, n_transition_frames=25):
     
+    print('Number of df activities in umapped values: ', len(df[df['id'].isin(combined_embeddings.index)]))
+
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
@@ -180,17 +185,18 @@ def render_frames(df, umapped, combined_embeddings, categories,
     def get_month_data(period):
         month_ids = df[df['date'].dt.to_period('W') == period]['id'].unique()
         mask = combined_embeddings.index.isin(month_ids)
-        month_umapped = umapped[mask]
-        month_colors = categories.loc[mask].map(title_colours).values
-        return month_umapped, month_colors
+        period_umapped = umapped[mask]
+        period_colors = categories.loc[mask].map(title_colours).values
+        print(f'period: {period}, umapped embedding values: {len(period_umapped)}')
+        return period_umapped, period_colors
 
     for i, period in tqdm(enumerate(periods)):
-        t = pd.Period('2025-10-13/2025-10-19', 'W-SUN')
-        month_umapped, month_colors = get_month_data(t)
+        # t = pd.Period('2025-10-13/2025-10-19', 'W-SUN')
+        period_umapped, period_colors = get_month_data(period)
         # Fade in
         for t in range(n_transition_frames):
             alpha = t / n_transition_frames
-            draw_frame(month_umapped, month_colors, alpha)
+            draw_frame(period_umapped, period_colors, alpha)
             # display(fig)
             fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png', 
                        bbox_inches='tight', transparent=True)
@@ -203,12 +209,12 @@ def render_frames(df, umapped, combined_embeddings, categories,
             frame_idx += 1
 
         # Fade out
-        # for t in range(n_transition_frames):
-        #     alpha = 1 - (t / n_transition_frames)
-        #     draw_frame(month_umapped, month_colors, alpha)
-        #     fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png',
-        #                bbox_inches='tight', transparent=True)
-        #     frame_idx += 1
+        for t in range(n_transition_frames):
+            alpha = 1 - (t / n_transition_frames)
+            draw_frame(period_umapped, period_colors, alpha)
+            fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png',
+                       bbox_inches='tight', transparent=True)
+            frame_idx += 1
 
         print(f'Rendered {period} ({frame_idx} frames total)')
 
@@ -216,9 +222,9 @@ def render_frames(df, umapped, combined_embeddings, categories,
     print(f'Done — {frame_idx} frames saved to {output_dir}/')
 
 render_frames(
-    df=watch_data[watch_data['date'].dt.to_period('M')>'2025-06'],
+    df=watch_data[watch_data['date'].dt.to_period('M')<'2023-03'],
     umapped=umapped, 
     combined_embeddings=combined_embeddings, 
     categories=categories, 
     title_colours=title_colours,
-    output_dir='charts/frames_v2')
+    output_dir='charts/frames_v3')
