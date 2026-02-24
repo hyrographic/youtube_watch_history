@@ -84,8 +84,8 @@ def encode_cached(m, transformer, values, file_name, index):
     np.save(fp, emb)
     return pd.DataFrame(emb, index=index)
 
-m = 'all-MiniLM-L6-v2' # fast model
-# m = 'all-mpnet-base-v2' #slow model
+# m = 'all-MiniLM-L6-v2' # fast model
+m = 'all-mpnet-base-v2' #slow model
 sent_transformer = create_transformer(m)
 
 cat_embeddings = encode_cached(m, sent_transformer, categories.values, 'cat_emb.npy', categories.index)
@@ -103,40 +103,45 @@ title_colours = {cat: palette[i] for i, cat in enumerate(_cats.unique())}
 title_cmap = _cats.map(title_colours)
 
 # ====== combine embeddings ======
-# ! OPTION 1
-w_tags = 1.0
-w_category = 1.25
-w_title = 2.0
-w_desc  = 1.0
+# ---- embedding coverage ----
+_embs = {'cat': cat_embeddings, 'title': title_embeddings, 'desc': desc_embeddings, 'tags': tags_embeddings}
+_total = len(mdata_nlp)
+for name, emb in _embs.items():
+    print(f'{name:6s}: {len(emb):>5d} / {_total}')
+print()
+for (n1, e1), (n2, e2) in [
+    (('cat',   cat_embeddings),   ('title', title_embeddings)),
+    (('cat',   cat_embeddings),   ('desc',  desc_embeddings)),
+    (('cat',   cat_embeddings),   ('tags',  tags_embeddings)),
+    (('title', title_embeddings), ('desc',  desc_embeddings)),
+    (('title', title_embeddings), ('tags',  tags_embeddings)),
+    (('desc',  desc_embeddings),  ('tags',  tags_embeddings)),
+]:
+    n = len(e1.index.intersection(e2.index))
+    print(f'{n1} ∩ {n2}: {n:>5d} / {_total}')
+print()
+_all4 = (cat_embeddings.index.intersection(title_embeddings.index)
+                             .intersection(desc_embeddings.index)
+                             .intersection(tags_embeddings.index))
+_any1 = (cat_embeddings.index.union(title_embeddings.index)
+                             .union(desc_embeddings.index)
+                             .union(tags_embeddings.index))
+print(f'all 4:  {len(_all4):>5d} / {_total}')
+print(f'any 1:  {len(_any1):>5d} / {_total}')
 
-# Intersect indices so every row has all four embeddings present.
-# reindex + += propagates NaN: any video missing one feature silently becomes all-NaN.
+# ! OPTION 1
+# w_tags = 1.0
+w_category = 0.25
+w_title = 1.0
+w_desc  = 0.25
+
+# # Intersect indices so every row has all four embeddings present.
+# # reindex + += propagates NaN: any video missing one feature silently becomes all-NaN.
 common_idx = (cat_embeddings.index
               .intersection(title_embeddings.index)
               .intersection(desc_embeddings.index)
               .intersection(tags_embeddings.index))
 print(f'Videos with all embeddings: {len(common_idx)} / {len(mdata_nlp)}')
-
-combined_embeddings = (
-    cat_embeddings.loc[common_idx]   * w_category +
-    title_embeddings.loc[common_idx] * w_title +
-    desc_embeddings.loc[common_idx]  * w_desc +
-    tags_embeddings.loc[common_idx]  * w_tags
-) / (w_category + w_title + w_desc + w_tags)
-
-# ! OPTION 2
-# w_tags = 1.0
-# w_category = 1.25
-# w_title = 2.0
-# w_desc  = 1.0
-
-# # Intersect indices so every row has all four embeddings present.
-# # reindex + += propagates NaN: any video missing one feature silently becomes all-NaN.
-# common_idx = (cat_embeddings.index
-#               .intersection(title_embeddings.index)
-#               .intersection(desc_embeddings.index)
-#               .intersection(tags_embeddings.index))
-# print(f'Videos with all embeddings: {len(common_idx)} / {len(mdata_nlp)}')
 
 # combined_embeddings = (
 #     cat_embeddings.loc[common_idx]   * w_category +
@@ -144,6 +149,36 @@ combined_embeddings = (
 #     desc_embeddings.loc[common_idx]  * w_desc +
 #     tags_embeddings.loc[common_idx]  * w_tags
 # ) / (w_category + w_title + w_desc + w_tags)
+
+# ! OPTION 2 — keep any video that has at least 1 embedding; average over available ones only
+# w_tags = 1.5
+w_category = 0.75
+w_title = 1.0
+w_desc  = 0.75
+
+all_idx = (cat_embeddings.index
+           .union(title_embeddings.index)
+           .union(desc_embeddings.index)
+           .union(tags_embeddings.index)
+           )
+
+weighted_sum = pd.DataFrame(0.0, index=all_idx, columns=range(cat_embeddings.shape[1]))
+weight_total = pd.Series(0.0, index=all_idx)
+
+for emb, w in [
+    (cat_embeddings,   w_category),
+    (title_embeddings, w_title),
+    (desc_embeddings,  w_desc),
+    # (tags_embeddings,  w_tags),
+]:
+    present = all_idx.intersection(emb.index)
+    weighted_sum.loc[present] += emb.loc[present].values * w
+    weight_total.loc[present] += w
+
+# Drop any row where no embedding was available (shouldn't happen given the union, but be safe)
+valid = weight_total > 0
+combined_embeddings = weighted_sum.loc[valid].div(weight_total.loc[valid], axis=0)
+print(f'Videos with at least 1 embedding: {valid.sum()} / {len(mdata_nlp)}')
 
 # ====== UMAP dimensionality reduction ======
 # - TITLE
@@ -163,12 +198,12 @@ masked_cats = categories.loc[mask]
 
 # ====== UMAP boiler plate ======
 n_components = 2
-n_neighbors = 100
+n_neighbors = 900
 fit = umap.UMAP(
     n_neighbors=n_neighbors,
-    min_dist=0.0,
+    min_dist=1,
     n_components=n_components,
-    metric='correlation'
+    metric='euclidean'
 )
 umapped = fit.fit_transform(combined_embeddings);
 umapped_colors = categories.map(title_colours)
@@ -182,7 +217,9 @@ c = umapped_colors
 fig = plt.figure(figsize=(19, 10), dpi=300)
 if n_components == 2:
     ax = fig.add_subplot(111)
-    ax.scatter(um[:,0], um[:,1], c=c, s=10, alpha=1)
+    ax.scatter(um[:,0], um[:,1], c=c, s=3, alpha=0.5)
+    # ax.set_ylim(7, 9)
+    # ax.set_xlim(7, 9)
 if n_components == 3:
     ax = fig.add_subplot(111, projection='3d')
     ax.scatter(um[:,0], um[:,1], um[:,2], c=c, s=5)
