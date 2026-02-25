@@ -4,12 +4,13 @@ from typing import Literal
 from pathlib import Path
 import os
 import shutil
-
+from collections import Counter
 from datetime import datetime
-
 import re
 from tqdm import tqdm
+import random
 
+# data vis
 import seaborn as sns
 import matplotlib
 from matplotlib import pyplot as plt
@@ -19,13 +20,19 @@ from matplotlib import font_manager
 from matplotlib.font_manager import FontProperties
 from matplotlib.patches import Patch
 from matplotlib.animation import FuncAnimation
+import matplotlib.colors as mcolors
 
+# machine learning
 from scipy.ndimage import gaussian_filter1d
-
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sentence_transformers import SentenceTransformer
-
+from sklearn.cluster import HDBSCAN
 import umap
+
+# nlp
+import nltk
+nltk.download('stopwords', quiet=True)
+from nltk.corpus import stopwords
 
 # local imports
 from src import read_and_load_data
@@ -64,7 +71,7 @@ desc_data = mdata_nlp[mdata_nlp['description'].notna()]
 desc = desc_data['description']
 
 tags_data = mdata_nlp[(mdata_nlp['tags'].notna()) &(mdata_nlp['tags'].apply(len) > 0)]
-tags = tags_data['tags'].str.join('; ')
+tags = tags_data['tags'].str.join(' ')
 
 # ====== generate embeddings ======
 # sent_transformer = {'all-MiniLM-L6-v2':SentenceTransformer("all-MiniLM-L6-v2")} # fast model
@@ -151,25 +158,26 @@ print(f'Videos with all embeddings: {len(common_idx)} / {len(mdata_nlp)}')
 # ) / (w_category + w_title + w_desc + w_tags)
 
 # ! OPTION 2 — keep any video that has at least 1 embedding; average over available ones only
-# w_tags = 1.5
-w_category = 0.75
+# Category is a discrete label (all "Music" videos share the exact same vector),
+# so including it creates hard macro-cluster boundaries and suppresses sub-category structure.
+# Use title + desc only for the embedding; keep categories only for colouring.
 w_title = 1.0
-w_desc  = 0.75
+w_desc  = 0.1
+w_tags = 0.8
 
-all_idx = (cat_embeddings.index
+all_idx = (title_embeddings.index
            .union(title_embeddings.index)
            .union(desc_embeddings.index)
            .union(tags_embeddings.index)
            )
 
-weighted_sum = pd.DataFrame(0.0, index=all_idx, columns=range(cat_embeddings.shape[1]))
+weighted_sum = pd.DataFrame(0.0, index=all_idx, columns=range(title_embeddings.shape[1]))
 weight_total = pd.Series(0.0, index=all_idx)
 
 for emb, w in [
-    (cat_embeddings,   w_category),
     (title_embeddings, w_title),
     (desc_embeddings,  w_desc),
-    # (tags_embeddings,  w_tags),
+    (tags_embeddings,  w_tags)
 ]:
     present = all_idx.intersection(emb.index)
     weighted_sum.loc[present] += emb.loc[present].values * w
@@ -179,6 +187,24 @@ for emb, w in [
 valid = weight_total > 0
 combined_embeddings = weighted_sum.loc[valid].div(weight_total.loc[valid], axis=0)
 print(f'Videos with at least 1 embedding: {valid.sum()} / {len(mdata_nlp)}')
+
+# ====== Embed on single combined string ======
+_combined_idx = titles.index.union(tags_data['tags'].index)
+_titles_aligned = titles.reindex(_combined_idx)
+_tags_aligned   = tags_data['tags'].reindex(_combined_idx)
+
+def compose(vid_id):
+    parts = []
+    tag_list = _tags_aligned.loc[vid_id]
+    if isinstance(tag_list, list) and tag_list:
+        parts.append(' '.join(tag_list[:10]))
+    title = _titles_aligned.loc[vid_id]
+    if isinstance(title, str) and title:
+        parts.append(title)
+    return ' | '.join(parts)
+
+composed = pd.Series([compose(i) for i in _combined_idx], index=_combined_idx)
+composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'composed_emb.npy', composed.index)
 
 # ====== UMAP dimensionality reduction ======
 # - TITLE
@@ -193,39 +219,168 @@ print(f'Videos with at least 1 embedding: {valid.sum()} / {len(mdata_nlp)}')
 # ====== Get single month sample ======
 single_month = watch_data[watch_data['date'].dt.to_period('M') == '2024-04']
 single_month_ids = single_month['id'].unique().tolist()
-mask = combined_embeddings.index.isin(single_month_ids)
+mask = composed_embeddings.index.isin(single_month_ids)
 masked_cats = categories.loc[mask]
 
 # ====== UMAP boiler plate ======
 n_components = 2
-n_neighbors = 900
+n_neighbors = 8  # low = local structure / sub-clusters; high = global topology
 fit = umap.UMAP(
     n_neighbors=n_neighbors,
-    min_dist=1,
+    min_dist=0.0,   # 0 = maximum internal compactness
+    spread=3.0,     # spread clusters apart from each other (pairs with min_dist)
     n_components=n_components,
-    metric='euclidean'
+    metric='cosine'
 )
-umapped = fit.fit_transform(combined_embeddings);
-umapped_colors = categories.map(title_colours)
+umap_embeddings = fit.fit_transform(composed_embeddings);
+umap_colors = categories.map(title_colours)
 
-umapped_month = umapped[mask]
+umap_month = umap_embeddings[mask]
 month_colors = masked_cats.map(title_colours)
 
-um = umapped
-c = umapped_colors
+um = umap_embeddings
+c = umap_colors
 
 fig = plt.figure(figsize=(19, 10), dpi=300)
 if n_components == 2:
     ax = fig.add_subplot(111)
     ax.scatter(um[:,0], um[:,1], c=c, s=3, alpha=0.5)
-    # ax.set_ylim(7, 9)
-    # ax.set_xlim(7, 9)
+    # ax.set_ylim(-10, 10)
+    # ax.set_xlim(0, 20)
 if n_components == 3:
     ax = fig.add_subplot(111, projection='3d')
     ax.scatter(um[:,0], um[:,1], um[:,2], c=c, s=5)
 
 handles = [Patch(color=title_colours[cat], label=cat) for cat in title_colours]
 ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.05),ncol=4, frameon=False)
+
+# ====== clustering ======
+clusterer = HDBSCAN(min_cluster_size=50, min_samples=10, metric='euclidean')
+labels = clusterer.fit_predict(umap_embeddings)
+clustered_embeddings = pd.DataFrame(umap_embeddings, index=composed_embeddings.index)
+clustered_embeddings['hdbscan_label'] = labels
+clustered_embeddings['channel'] = clustered_embeddings.index.map(watch_data.set_index('id')['channel_title'].to_dict()).fillna('None')
+print('Number of HDBSCAN clusters: ', clustered_embeddings['hdbscan_label'].nunique())
+
+# generate cluster colours
+n_clusters = clustered_embeddings['channel'].nunique()
+cmap = plt.cm.get_cmap('hsv', n_clusters)
+colors = {label: cmap(i) for i, label in enumerate(sorted(set(labels)))}
+
+# plot clusters
+fig, ax = plt.subplots(figsize=(16, 10))
+for label, group in clustered_embeddings.groupby('hdbscan_label'):
+    ax.scatter(
+        group[0], group[1],
+        c=[colors[label]],
+        s=3,
+        alpha=0.5,
+        linewidths=0,
+        label=label if label != -1 else 'noise'
+    )
+# noise points (label == -1 from HDBSCAN) styled separately
+noise = clustered_embeddings[clustered_embeddings['hdbscan_label'] == -1]
+ax.scatter(noise[0], noise[1], c='lightgrey', s=2, alpha=0.3, linewidths=0)
+plt.tight_layout()
+
+# handles = [Patch(color=colors[cluster], label=cluster) for cluster in clustered_embeddings['hdbscan_label'].unique()]
+# ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.05),ncol=4, frameon=False)
+
+plt.show()
+
+# ====== inspect random cluster ======
+def tokenize(text):
+    if not isinstance(text, str):
+        return []
+    return [w for w in re.findall(r"[a-z']+", text.lower()) if w not in stopwords_list and len(w) > 1]
+
+def sample_links(ids, n=2):
+    sampled = random.sample(ids, min(n, len(ids)))
+    return '  '.join(f'https://youtube.com/watch?v={i}' for i in sampled)
+stopwords_list = set(stopwords.words('english'))
+
+# ── Choose random cluster ────────────────────────────────────────────────────
+valid_labels = [l for l in labels if l != -1]
+s = random.sample(list(set(valid_labels)), 1)[0]
+s_df = clustered_embeddings[clustered_embeddings['hdbscan_label'] == s].copy()
+s_ids = s_df.index.tolist()
+print('Videos in cluster: ', len(s_df))
+s_watch_data = watch_data[watch_data['id'].isin(s_ids)].copy()
+print('Watched from: ', s_watch_data['date'].min(), ' to ', s_watch_data['date'].max())
+
+# ── Weekly watch bar chart ───────────────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(18, 3))
+
+weekly = s_watch_data.set_index('date').resample('W')['id'].count()
+ax.bar(weekly.index, weekly.values, width=6, color='steelblue', alpha=0.8)
+
+ax.set_xlabel('Week')
+ax.set_ylabel('Videos watched')
+ax.set_title(f'Cluster {s} — weekly watch activity')
+plt.xticks(rotation=45, ha='right')
+plt.tight_layout()
+plt.show()
+
+# ── Cluster highlight scatter ────────────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(18, 6))
+
+mask = clustered_embeddings['hdbscan_label'] != s
+ax.scatter(
+    clustered_embeddings.loc[mask, 0],
+    clustered_embeddings.loc[mask, 1],
+    c='grey', s=2, alpha=0.3, linewidths=0
+)
+
+ax.scatter(
+    s_df[0], s_df[1],
+    c='crimson', s=8, alpha=0.9, linewidths=0,
+    label=f'Cluster {s} (n={len(s_df)})'
+)
+
+ax.legend(loc='upper right')
+ax.set_title(f'Cluster {s} — position in embedding space')
+ax.axis('off')
+plt.tight_layout()
+plt.show()
+
+# ── Channels ────────────────────────────────────────────────────────────────
+print('\n── Top Channels ──')
+channel_counts = s_watch_data['channel_title'].value_counts().head(10)
+for channel, count in channel_counts.items():
+    print(f'  {count:>4}  {channel}')
+
+# ── Title word frequencies ───────────────────────────────────────────────────
+cluster_meta = mdata_nlp[mdata_nlp.index.isin(s_ids)]
+
+word_to_ids = {}
+for vid_id, title in cluster_meta['title'].dropna().items():
+    for word in tokenize(title):
+        word_to_ids.setdefault(word, []).append(vid_id)
+
+title_words = Counter({w: len(ids) for w, ids in word_to_ids.items()})
+
+print('\n── Top Title Words ──')
+for word, count in title_words.most_common(20):
+    print(f'  {count:>4}  {word:<25} {sample_links(word_to_ids[word])}')
+
+# ── Tag frequencies ──────────────────────────────────────────────────────────
+tag_to_ids = {}
+for vid_id, tags in cluster_meta['tags'].dropna().items():
+    if isinstance(tags, list):
+        tag_list = [t.lower().strip() for t in tags]
+    elif isinstance(tags, str):
+        tag_list = [t.lower().strip() for t in tags.split(',')]
+    else:
+        continue
+    for tag in tag_list:
+        tag_to_ids.setdefault(tag, []).append(vid_id)
+
+tag_counts = Counter({t: len(ids) for t, ids in tag_to_ids.items()})
+
+print('\n── Top Tags ──')
+for tag, count in tag_counts.most_common(20):
+    print(f'  {count:>4}  {tag:<25} {sample_links(tag_to_ids[tag])}')
+
 
 # ====== UMAP Animation ======
 def render_frames(df, umapped, combined_embeddings, categories, title_colours, output_dir, n_fade_in_frames=20, n_fade_out_frames=30, window_size=3):
