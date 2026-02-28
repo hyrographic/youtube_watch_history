@@ -61,6 +61,8 @@ read_and_load_data.metadata_group_errors(metadata_df)
 mdata_nlp = metadata_df.drop_duplicates(subset=['id']).dropna(subset=['id'])
 mdata_nlp.set_index('id', inplace=True)
 
+media_types_dict = mdata_nlp['media_type'].to_dict()
+
 categories = mdata_nlp['categories'].apply(lambda d: d[0] if isinstance(d, list) else 'None')
 categories.name = 'category'
 
@@ -72,6 +74,73 @@ desc = desc_data['description']
 
 tags_data = mdata_nlp[(mdata_nlp['tags'].notna()) &(mdata_nlp['tags'].apply(len) > 0)]
 tags = tags_data['tags'].str.join(' ')
+
+# ====== update stopwords ======
+stopwords_list = list(set(stopwords.words('english')))
+
+with open(Path('resources/english_stopwords.txt').resolve(), 'r') as f:
+    kaggle_stopwords = f.read().split('\n')
+stopwords_list.extend(kaggle_stopwords)
+
+with open(Path('resources/custom_stopwords.txt').resolve(), 'r') as f:
+    custom_stopwords = f.read().split('\n')
+    add_to_stopwords = [x.strip().lower() for x in custom_stopwords if ':' not in x]
+    str_replacements = {kv[0]:kv[1] for x in custom_stopwords if ':' in x for kv in [x.strip().lower().split(':')]}
+stopwords_list.extend(add_to_stopwords)
+
+# ====== clean tags data ======
+tag_values = tags_data['tags'].explode()
+
+tag_values = (
+    tag_values
+    .str.lower()
+    .str.strip()
+)
+
+# remove stop words from tag values
+tag_values = tag_values[~tag_values.isin(stopwords_list)]
+# apply string replacements
+tag_values = tag_values.map(str_replacements, na_action=None).fillna(tag_values)
+# remove shorts
+tag_values = tag_values.str.replace(' ?shorts ?', '', regex=1)
+
+tag_values.dropna(inplace=True)
+
+print('unique tags: ', tag_values.nunique())
+tag_values.value_counts().iloc[50:].head(25)
+# tag_values.value_counts(normalize=True).head(25)
+
+tags_cleaned = tag_values.groupby(level=0).agg(list)
+
+# ====== clean title data ======
+def tokenise(text):
+    if not isinstance(text, str):
+        return []
+    return [w for w in re.findall(r"[a-z']+", text.lower()) if w not in stopwords_list and len(w) > 1]
+
+title_values = title_data['title']
+title_tokens = title_values.apply(tokenise).explode()
+
+title_tokens = (
+    title_tokens
+    .str.lower()
+    .str.strip()
+)
+
+# remove stop words from tag values
+title_tokens = title_tokens[~title_tokens.isin(stopwords_list)]
+# apply string replacements
+title_tokens = title_tokens.map(str_replacements, na_action=None).fillna(title_tokens)
+# remove shorts
+title_tokens = title_tokens.str.replace(' ?shorts ?', '', regex=1)
+
+title_tokens.dropna(inplace=True)
+
+print('unique words: ', title_tokens.nunique())
+title_tokens.value_counts().head(25)
+# title_tokens.value_counts(normalize=True).head(25)
+
+titles_cleaned = title_tokens.groupby(level=0).agg(lambda x: ' '.join(x))
 
 # ====== generate embeddings ======
 # sent_transformer = {'all-MiniLM-L6-v2':SentenceTransformer("all-MiniLM-L6-v2")} # fast model
@@ -93,104 +162,12 @@ def encode_cached(m, transformer, values, file_name, index):
 
 # m = 'all-MiniLM-L6-v2' # fast model
 m = 'all-mpnet-base-v2' #slow model
+m = 'distilbert-base-nli-mean-tokens'
 sent_transformer = create_transformer(m)
 
-cat_embeddings = encode_cached(m, sent_transformer, categories.values, 'cat_emb.npy', categories.index)
-title_embeddings = encode_cached(m, sent_transformer, titles.values,'title_emb.npy', titles.index)
-desc_embeddings = encode_cached(m, sent_transformer, desc.values,'desc_emb.npy',  desc.index)
-tags_embeddings = encode_cached(m, sent_transformer, tags.values,'tags_emb.npy',  tags.index)
-
-print(f'cat={cat_embeddings.shape} title={title_embeddings.shape} desc={desc_embeddings.shape} tags={tags_embeddings.shape}')
-
-_cats = categories.loc[title_embeddings.index]
-palette = sns.color_palette('tab20', 16)
-category_colours = {cat: palette[i] for i, cat in enumerate(categories.unique())}
-category_cmap = categories.map(category_colours)
-title_colours = {cat: palette[i] for i, cat in enumerate(_cats.unique())}
-title_cmap = _cats.map(title_colours)
-
-# ====== combine embeddings ======
-# ---- embedding coverage ----
-_embs = {'cat': cat_embeddings, 'title': title_embeddings, 'desc': desc_embeddings, 'tags': tags_embeddings}
-_total = len(mdata_nlp)
-for name, emb in _embs.items():
-    print(f'{name:6s}: {len(emb):>5d} / {_total}')
-print()
-for (n1, e1), (n2, e2) in [
-    (('cat',   cat_embeddings),   ('title', title_embeddings)),
-    (('cat',   cat_embeddings),   ('desc',  desc_embeddings)),
-    (('cat',   cat_embeddings),   ('tags',  tags_embeddings)),
-    (('title', title_embeddings), ('desc',  desc_embeddings)),
-    (('title', title_embeddings), ('tags',  tags_embeddings)),
-    (('desc',  desc_embeddings),  ('tags',  tags_embeddings)),
-]:
-    n = len(e1.index.intersection(e2.index))
-    print(f'{n1} ∩ {n2}: {n:>5d} / {_total}')
-print()
-_all4 = (cat_embeddings.index.intersection(title_embeddings.index)
-                             .intersection(desc_embeddings.index)
-                             .intersection(tags_embeddings.index))
-_any1 = (cat_embeddings.index.union(title_embeddings.index)
-                             .union(desc_embeddings.index)
-                             .union(tags_embeddings.index))
-print(f'all 4:  {len(_all4):>5d} / {_total}')
-print(f'any 1:  {len(_any1):>5d} / {_total}')
-
-# ! OPTION 1
-# w_tags = 1.0
-w_category = 0.25
-w_title = 1.0
-w_desc  = 0.25
-
-# # Intersect indices so every row has all four embeddings present.
-# # reindex + += propagates NaN: any video missing one feature silently becomes all-NaN.
-common_idx = (cat_embeddings.index
-              .intersection(title_embeddings.index)
-              .intersection(desc_embeddings.index)
-              .intersection(tags_embeddings.index))
-print(f'Videos with all embeddings: {len(common_idx)} / {len(mdata_nlp)}')
-
-# combined_embeddings = (
-#     cat_embeddings.loc[common_idx]   * w_category +
-#     title_embeddings.loc[common_idx] * w_title +
-#     desc_embeddings.loc[common_idx]  * w_desc +
-#     tags_embeddings.loc[common_idx]  * w_tags
-# ) / (w_category + w_title + w_desc + w_tags)
-
-# ! OPTION 2 — keep any video that has at least 1 embedding; average over available ones only
-# Category is a discrete label (all "Music" videos share the exact same vector),
-# so including it creates hard macro-cluster boundaries and suppresses sub-category structure.
-# Use title + desc only for the embedding; keep categories only for colouring.
-w_title = 1.0
-w_desc  = 0.1
-w_tags = 0.8
-
-all_idx = (title_embeddings.index
-           .union(title_embeddings.index)
-           .union(desc_embeddings.index)
-           .union(tags_embeddings.index)
-           )
-
-weighted_sum = pd.DataFrame(0.0, index=all_idx, columns=range(title_embeddings.shape[1]))
-weight_total = pd.Series(0.0, index=all_idx)
-
-for emb, w in [
-    (title_embeddings, w_title),
-    (desc_embeddings,  w_desc),
-    (tags_embeddings,  w_tags)
-]:
-    present = all_idx.intersection(emb.index)
-    weighted_sum.loc[present] += emb.loc[present].values * w
-    weight_total.loc[present] += w
-
-# Drop any row where no embedding was available (shouldn't happen given the union, but be safe)
-valid = weight_total > 0
-combined_embeddings = weighted_sum.loc[valid].div(weight_total.loc[valid], axis=0)
-print(f'Videos with at least 1 embedding: {valid.sum()} / {len(mdata_nlp)}')
-
 # ====== Embed on single combined string ======
-_combined_idx = titles.index.union(tags_data['tags'].index)
-_titles_aligned = titles.reindex(_combined_idx)
+_combined_idx = titles_cleaned.index.union(tags_cleaned.index)
+_titles_aligned = titles_cleaned.reindex(_combined_idx)
 _tags_aligned   = tags_data['tags'].reindex(_combined_idx)
 
 def compose(vid_id):
@@ -205,17 +182,9 @@ def compose(vid_id):
 
 composed = pd.Series([compose(i) for i in _combined_idx], index=_combined_idx)
 composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'composed_emb.npy', composed.index)
+composed_cats = categories.loc[composed.index].copy()
 
 # ====== UMAP dimensionality reduction ======
-# - TITLE
-# reducer_2D_title = umap.UMAP(n_components=2, random_state=42, min_dist=0.3, spread=10.0)
-# reduced_title_emb = reducer_2D_title.fit_transform(title_embeddings)
-# reduced_title_emb = reducer_2D_title.transform(title_embeddings)
-
-# plt.scatter(reduced_title_emb[:, 0],reduced_title_emb[:, 1], s=8, alpha=0.78, linewidths=0, color=c)
-# plt.gca().set_aspect('equal', 'datalim')
-# plt.title('UMAP', fontsize=24);
-
 # ====== Get single month sample ======
 single_month = watch_data[watch_data['date'].dt.to_period('M') == '2024-04']
 single_month_ids = single_month['id'].unique().tolist()
@@ -223,20 +192,24 @@ mask = composed_embeddings.index.isin(single_month_ids)
 masked_cats = categories.loc[mask]
 
 # ====== UMAP boiler plate ======
+# video_embeddings = composed_embeddings[composed_embeddings.index.map(media_types_dict) == 'video']
 n_components = 2
-n_neighbors = 8  # low = local structure / sub-clusters; high = global topology
+n_neighbors = 16  # low = local structure / sub-clusters; high = global topology
 fit = umap.UMAP(
     n_neighbors=n_neighbors,
     min_dist=0.0,   # 0 = maximum internal compactness
     spread=3.0,     # spread clusters apart from each other (pairs with min_dist)
     n_components=n_components,
-    metric='cosine'
+    metric='correlation'
 )
 umap_embeddings = fit.fit_transform(composed_embeddings);
-umap_colors = categories.map(title_colours)
 
-umap_month = umap_embeddings[mask]
-month_colors = masked_cats.map(title_colours)
+palette = sns.color_palette('tab20', 16)
+colours = {cat: palette[i] for i, cat in enumerate(composed_cats.unique())}
+umap_colors = composed_cats.map(colours)
+
+# umap_month = umap_embeddings[mask]
+# month_colors = masked_cats.map(colours)
 
 um = umap_embeddings
 c = umap_colors
@@ -251,57 +224,54 @@ if n_components == 3:
     ax = fig.add_subplot(111, projection='3d')
     ax.scatter(um[:,0], um[:,1], um[:,2], c=c, s=5)
 
-handles = [Patch(color=title_colours[cat], label=cat) for cat in title_colours]
+handles = [Patch(color=colours[cat], label=cat) for cat in colours]
 ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.05),ncol=4, frameon=False)
 
-# ====== clustering ======
+# ====== HDBSCAN clustering ======
 clusterer = HDBSCAN(min_cluster_size=50, min_samples=10, metric='euclidean')
 labels = clusterer.fit_predict(umap_embeddings)
 clustered_embeddings = pd.DataFrame(umap_embeddings, index=composed_embeddings.index)
 clustered_embeddings['hdbscan_label'] = labels
 clustered_embeddings['channel'] = clustered_embeddings.index.map(watch_data.set_index('id')['channel_title'].to_dict()).fillna('None')
+clustered_embeddings['categories'] = clustered_embeddings.index.map(categories).fillna('None')
 print('Number of HDBSCAN clusters: ', clustered_embeddings['hdbscan_label'].nunique())
+print('Cluster Sizes: ', clustered_embeddings['hdbscan_label'].value_counts().head(10))
 
 # generate cluster colours
-n_clusters = clustered_embeddings['channel'].nunique()
+unique_labels = sorted(l for l in set(clustered_embeddings['hdbscan_label']) if l != -1)
+n_clusters = len(unique_labels)
 cmap = plt.cm.get_cmap('hsv', n_clusters)
-colors = {label: cmap(i) for i, label in enumerate(sorted(set(labels)))}
+hdbscan_colours = {label: cmap(i) for i, label in enumerate(unique_labels)}
 
 # plot clusters
 fig, ax = plt.subplots(figsize=(16, 10))
-for label, group in clustered_embeddings.groupby('hdbscan_label'):
+for label, group in clustered_embeddings[clustered_embeddings['hdbscan_label'] != -1].groupby('hdbscan_label'):
     ax.scatter(
         group[0], group[1],
-        c=[colors[label]],
+        color=hdbscan_colours[label],
         s=3,
         alpha=0.5,
         linewidths=0,
-        label=label if label != -1 else 'noise'
     )
 # noise points (label == -1 from HDBSCAN) styled separately
 noise = clustered_embeddings[clustered_embeddings['hdbscan_label'] == -1]
 ax.scatter(noise[0], noise[1], c='lightgrey', s=2, alpha=0.3, linewidths=0)
 plt.tight_layout()
 
-# handles = [Patch(color=colors[cluster], label=cluster) for cluster in clustered_embeddings['hdbscan_label'].unique()]
+# handles = [Patch(color=hdbscan_colours[cluster], label=cluster) for cluster in clustered_embeddings['hdbscan_label'].unique()]
 # ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.05),ncol=4, frameon=False)
 
 plt.show()
 
 # ====== inspect random cluster ======
-def tokenize(text):
-    if not isinstance(text, str):
-        return []
-    return [w for w in re.findall(r"[a-z']+", text.lower()) if w not in stopwords_list and len(w) > 1]
-
 def sample_links(ids, n=2):
     sampled = random.sample(ids, min(n, len(ids)))
     return '  '.join(f'https://youtube.com/watch?v={i}' for i in sampled)
-stopwords_list = set(stopwords.words('english'))
 
 # ── Choose random cluster ────────────────────────────────────────────────────
 valid_labels = [l for l in labels if l != -1]
 s = random.sample(list(set(valid_labels)), 1)[0]
+s = 42
 s_df = clustered_embeddings[clustered_embeddings['hdbscan_label'] == s].copy()
 s_ids = s_df.index.tolist()
 print('Videos in cluster: ', len(s_df))
@@ -354,7 +324,7 @@ cluster_meta = mdata_nlp[mdata_nlp.index.isin(s_ids)]
 
 word_to_ids = {}
 for vid_id, title in cluster_meta['title'].dropna().items():
-    for word in tokenize(title):
+    for word in tokenise(title):
         word_to_ids.setdefault(word, []).append(vid_id)
 
 title_words = Counter({w: len(ids) for w, ids in word_to_ids.items()})
@@ -383,7 +353,7 @@ for tag, count in tag_counts.most_common(20):
 
 
 # ====== UMAP Animation ======
-def render_frames(df, umapped, combined_embeddings, categories, title_colours, output_dir, n_fade_in_frames=20, n_fade_out_frames=30, window_size=3):
+def render_frames(df, umapped, combined_embeddings, categories, output_dir, n_fade_in_frames=20, n_fade_out_frames=30, window_size=3):
     """
     window_size: number of consecutive periods visible at once.
       For any frame showing 'current' period i, a point from period p has:
@@ -403,7 +373,7 @@ def render_frames(df, umapped, combined_embeddings, categories, title_colours, o
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
 
-    periods = sorted(df['date'].dt.to_period('W').unique())
+    periods = sorted(df['date'].dt.to_period('D').unique())
     frame_idx = 0
 
     fig, ax = plt.subplots(figsize=(19, 10), dpi=150)
@@ -417,24 +387,26 @@ def render_frames(df, umapped, combined_embeddings, categories, title_colours, o
     # Fix axis limits to the full UMAP extent so every frame has the same coordinate system.
     # Without this, matplotlib auto-scales per frame and the view shifts → misalignment.
     pad = 0.5
-    ax.set_xlim(umapped[:, 0].min() - pad, umapped[:, 0].max() + pad)
-    ax.set_ylim(umapped[:, 1].min() - pad, umapped[:, 1].max() + pad)
+    ax.set_xlim(umapped[0].min() - pad, umapped[0].max() + pad)
+    ax.set_ylim(umapped[1].min() - pad, umapped[1].max() + pad)
 
     # Static background
     # ax.scatter(umapped[:,0], umapped[:,1], c=umapped_colors, s=10, alpha=0.05, linewidths=0)
 
-    handles = [Patch(color=title_colours[cat], label=cat) for cat in title_colours]
-    ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.02),
-              ncol=4, frameon=False)
+    # handles = [Patch(color=hdbscan_colours[l], label=l) for l in hdbscan_colours]
+    # ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.02),
+    #           ncol=4, frameon=False)
 
     # Pre-cache per-period UMAP data so we don't re-query the DataFrame each frame
     period_data = []
     for period in periods:
-        month_ids = df[df['date'].dt.to_period('W') == period]['id'].unique()
+        month_ids = df[df['date'].dt.to_period('D') == period]['id'].unique()
         mask = combined_embeddings.index.isin(month_ids)
         period_umapped = umapped[mask]
-        period_colors = categories.loc[mask].map(title_colours).values
-        period_data.append((period_umapped, period_colors))
+        period_labels = combined_embeddings.loc[mask, 'hdbscan_label']
+        period_colors = np.array([hdbscan_colours.get(l, (0.6, 0.6, 0.6, 1.0)) for l in period_labels])
+        period_is_noise = (period_labels.values == -1)
+        period_data.append((period_umapped, period_colors, period_is_noise))
         print(f'period: {period}, umapped embedding values: {len(period_umapped)}')
 
     def get_alpha_for_offset(offset):
@@ -453,6 +425,16 @@ def render_frames(df, umapped, combined_embeddings, categories, title_colours, o
             return 1.0 - offset / (window_size - 1)
         return 0.0
 
+    noise_window = window_size * 4  # noise lingers across many more periods
+    def get_noise_alpha_for_offset(offset):
+        if offset == -1:
+            return 0.03
+        if offset == 0:
+            return 0.10
+        if 1 <= offset < noise_window - 1:
+            return 0.10 * (1.0 - offset / (noise_window - 1))
+        return 0.0
+
     def draw_rolling_frame(current_idx, progress_in=0.0, progress_out=0.0):
         """
         Draw the rolling window centred on current_idx.
@@ -466,10 +448,25 @@ def render_frames(df, umapped, combined_embeddings, categories, title_colours, o
         while ax.collections:
             ax.collections[-1].remove()
 
-        # Periods that can be visible at current_idx or current_idx+1
+        # ── Noise pass (wide window, no glow, dim) ──────────────────────────
+        p_lo_noise = max(0, current_idx - (noise_window - 2))
+        p_hi_noise = min(len(periods), current_idx + 2)
+        for p_idx in range(p_lo_noise, p_hi_noise):
+            offset = current_idx - p_idx
+            p = p_in if offset < 0 else p_out
+            noise_alpha = (1 - p) * get_noise_alpha_for_offset(offset) \
+                        + p       * get_noise_alpha_for_offset(offset + 1)
+            if noise_alpha <= 0:
+                continue
+            p_umapped, p_colors, p_is_noise = period_data[p_idx]
+            if not p_is_noise.any():
+                continue
+            ax.scatter(p_umapped[0].values[p_is_noise], p_umapped[1].values[p_is_noise],
+                       s=12, alpha=noise_alpha, color='grey', linewidths=0, zorder=1)
+
+        # ── Cluster pass (normal window, glow, full brightness) ──────────────
         p_lo = max(0, current_idx - (window_size - 2))
         p_hi = min(len(periods), current_idx + 2)  # +1 preview, +1 for next-step preview
-
         for p_idx in range(p_lo, p_hi):
             offset = current_idx - p_idx
             # offset=-1 is the incoming preview — use progress_in
@@ -481,19 +478,21 @@ def render_frames(df, umapped, combined_embeddings, categories, title_colours, o
             if alpha <= 0:
                 continue
 
-            p_umapped, p_colors = period_data[p_idx]
-            if len(p_umapped) == 0:
+            p_umapped, p_colors, p_is_noise = period_data[p_idx]
+            non_noise = ~p_is_noise
+            if not non_noise.any():
                 continue
+
+            xu = p_umapped[0].values[non_noise]
+            yu = p_umapped[1].values[non_noise]
+            pc = p_colors[non_noise]
 
             # Glow layers
             for size, glow_alpha in [(350, 0.05), (150, 0.05), (100, 0.1), (50, 0.3)]:
-                ax.scatter(p_umapped[:, 0], p_umapped[:, 1],
-                           s=size, alpha=glow_alpha * alpha,
-                           color=p_colors, linewidths=0, zorder=3)
+                ax.scatter(xu, yu, s=size, alpha=glow_alpha * alpha,
+                           color=pc, linewidths=0, zorder=3)
             # Core points
-            ax.scatter(p_umapped[:, 0], p_umapped[:, 1],
-                       s=50, alpha=alpha, color=p_colors,
-                       linewidths=0, zorder=4)
+            ax.scatter(xu, yu, s=45, alpha=alpha, color=pc, linewidths=0, zorder=4)
 
     steps_in  = max(n_fade_in_frames  - 1, 1)
     steps_out = max(n_fade_out_frames - 1, 1)
@@ -523,13 +522,16 @@ def render_frames(df, umapped, combined_embeddings, categories, title_colours, o
     plt.close(fig)
     print(f'Done — {frame_idx} frames saved to {output_dir}/')
 
+render_range = watch_data[(watch_data['date'].dt.to_period('M')>='2024-01') & (watch_data['date'].dt.to_period('M')<='2024-12')].copy()
+
+render_range = watch_data[(watch_data['date'].dt.to_period('D')>='2024-01-01') & (watch_data['date'].dt.to_period('D')<='2024-01-05')].copy()
+
 render_frames(
-    df=watch_data[watch_data['date'].dt.to_period('M')<'2024-01'],
-    umapped=umapped,
-    combined_embeddings=combined_embeddings,
+    df=render_range,
+    umapped=clustered_embeddings,
+    combined_embeddings=clustered_embeddings,
     categories=categories,
-    title_colours=title_colours,
-    output_dir='charts/frames_v3',
+    output_dir='charts/frames_v5',
     n_fade_in_frames=15,
-    n_fade_out_frames=15,
+    n_fade_out_frames=30,
 )
