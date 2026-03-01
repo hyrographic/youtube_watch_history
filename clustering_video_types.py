@@ -143,9 +143,6 @@ title_tokens.value_counts().head(25)
 titles_cleaned = title_tokens.groupby(level=0).agg(lambda x: ' '.join(x))
 
 # ====== generate embeddings ======
-# sent_transformer = {'all-MiniLM-L6-v2':SentenceTransformer("all-MiniLM-L6-v2")} # fast model
-# sent_transformer = SentenceTransformer("all-mpnet-base-v2") # slow model
-
 def create_transformer(model):
     return SentenceTransformer(model)
 
@@ -161,7 +158,7 @@ def encode_cached(m, transformer, values, file_name, index):
     return pd.DataFrame(emb, index=index)
 
 # m = 'all-MiniLM-L6-v2' # fast model
-m = 'all-mpnet-base-v2' #slow model
+# m = 'all-mpnet-base-v2' #slow model
 m = 'distilbert-base-nli-mean-tokens'
 sent_transformer = create_transformer(m)
 
@@ -271,7 +268,7 @@ def sample_links(ids, n=2):
 # ── Choose random cluster ────────────────────────────────────────────────────
 valid_labels = [l for l in labels if l != -1]
 s = random.sample(list(set(valid_labels)), 1)[0]
-s = 42
+s = 195
 s_df = clustered_embeddings[clustered_embeddings['hdbscan_label'] == s].copy()
 s_ids = s_df.index.tolist()
 print('Videos in cluster: ', len(s_df))
@@ -353,30 +350,33 @@ for tag, count in tag_counts.most_common(20):
 
 
 # ====== UMAP Animation ======
-def render_frames(df, umapped, combined_embeddings, categories, output_dir, n_fade_in_frames=20, n_fade_out_frames=30, window_size=3):
+def render_frames(df, umapped, combined_embeddings, output_dir,
+                  fps=30, seconds_per_day=0.2,
+                  window_size=7, noise_window_multiplier=4,
+                  glow_size=1.0):
     """
-    window_size: number of consecutive periods visible at once.
-      For any frame showing 'current' period i, a point from period p has:
-        offset = i - p
-        offset = -1  → dim preview (appears 1 week before its recorded date)
-        offset =  0  → full brightness (recorded date)
-        offset 1..window_size-2 → linear fade toward 0
-        offset >= window_size-1 → invisible
+    fps / seconds_per_day → frames_per_day = round(fps * seconds_per_day)
+      e.g. 30fps × 0.2s = 6 frames per day.
 
-    n_fade_in_frames:  frames for a new period to rise from dim preview (offset -1) to full (offset 0)
-    n_fade_out_frames: frames for existing periods to advance one offset step (age / dim)
-    Total transition frames = max(n_fade_in_frames, n_fade_out_frames)
+    Within each day, watches are revealed in chronological order across
+    frames_per_day frames. The rolling window (window_size days) fades
+    previous days by day-offset, not frame-offset.
+
+    Stitch output with:
+      ffmpeg -r {fps} -i frame_%05d.png -c:v libx264 -pix_fmt yuv420p out.mp4
     """
-    print('Number of df activities in umapped values: ', len(df[df['id'].isin(combined_embeddings.index)]))
+    frames_per_day = max(1, round(fps * seconds_per_day))
+    noise_window   = window_size * noise_window_multiplier
+    print(f'frames_per_day={frames_per_day}  window_size={window_size}  noise_window={noise_window}')
+    print(f'Activities with embeddings: {len(df[df["id"].isin(combined_embeddings.index)])}')
 
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
     os.makedirs(output_dir)
 
-    periods = sorted(df['date'].dt.to_period('D').unique())
-    frame_idx = 0
+    days = sorted(df['date'].dt.to_period('D').unique())
 
-    fig, ax = plt.subplots(figsize=(19, 10), dpi=150)
+    fig, ax = plt.subplots(figsize=(16, 9), dpi=300)  # 3840×2160 (4K)
     fig.patch.set_alpha(1)
     ax.patch.set_alpha(0)
     ax.set_xticks([])
@@ -384,154 +384,134 @@ def render_frames(df, umapped, combined_embeddings, categories, output_dir, n_fa
     for spine in ax.spines.values():
         spine.set_visible(False)
 
-    # Fix axis limits to the full UMAP extent so every frame has the same coordinate system.
-    # Without this, matplotlib auto-scales per frame and the view shifts → misalignment.
     pad = 0.5
-    ax.set_xlim(umapped[0].min() - pad, umapped[0].max() + pad)
-    ax.set_ylim(umapped[1].min() - pad, umapped[1].max() + pad)
+    x_min, x_max = umapped[0].min() - pad, umapped[0].max() + pad
+    y_min, y_max = umapped[1].min() - pad, umapped[1].max() + pad
+    x_c, y_c = (x_min + x_max) / 2, (y_min + y_max) / 2
+    x_h, y_h = (x_max - x_min) / 2 / 1.35, (y_max - y_min) / 2 / 1.35
+    ax.set_xlim(x_c - x_h, x_c + x_h)
+    ax.set_ylim(y_c - y_h, y_c + y_h)
+    ax.set_autoscale_on(False)  # prevent scatter calls inside draw_frame from resetting limits
 
-    # Static background
-    # ax.scatter(umapped[:,0], umapped[:,1], c=umapped_colors, s=10, alpha=0.05, linewidths=0)
+    # ── Pre-cache: one entry per day, watches in chronological order ──────────
+    day_ordered_ids = []  # list[list[str]]
+    day_umap_data   = []  # list[(umap_df, colors_arr, is_noise_arr)]
 
-    # handles = [Patch(color=hdbscan_colours[l], label=l) for l in hdbscan_colours]
-    # ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.02),
-    #           ncol=4, frameon=False)
+    for day in tqdm(days, desc='Pre-caching days'):
+        day_df = df[df['date'].dt.to_period('D') == day].sort_values('date')
+        seen, ordered = set(), []
+        for vid_id in day_df['id']:
+            if vid_id not in seen and vid_id in combined_embeddings.index:
+                seen.add(vid_id)
+                ordered.append(vid_id)
+        day_ordered_ids.append(ordered)
 
-    # Pre-cache per-period UMAP data so we don't re-query the DataFrame each frame
-    period_data = []
-    for period in periods:
-        month_ids = df[df['date'].dt.to_period('D') == period]['id'].unique()
-        mask = combined_embeddings.index.isin(month_ids)
-        period_umapped = umapped[mask]
-        period_labels = combined_embeddings.loc[mask, 'hdbscan_label']
-        period_colors = np.array([hdbscan_colours.get(l, (0.6, 0.6, 0.6, 1.0)) for l in period_labels])
-        period_is_noise = (period_labels.values == -1)
-        period_data.append((period_umapped, period_colors, period_is_noise))
-        print(f'period: {period}, umapped embedding values: {len(period_umapped)}')
+        if ordered:
+            umap_sub = combined_embeddings.loc[ordered]
+            labels   = umap_sub['hdbscan_label'].values
+            colors   = np.array([hdbscan_colours.get(l, (0.6, 0.6, 0.6, 1.0)) for l in labels])
+            is_noise = (labels == -1)
+        else:
+            umap_sub = combined_embeddings.iloc[:0]  # empty
+            colors   = np.empty((0, 4))
+            is_noise = np.empty(0, dtype=bool)
+        day_umap_data.append((umap_sub, colors, is_noise))
+        print(f'  {day}: {len(ordered)} embeddable watches')
 
+    # ── Alpha functions (offset = day_idx_current - day_idx_past) ────────────
     def get_alpha_for_offset(offset):
-        """
-        offset = current_period_idx - point_period_idx
-          -1  : dim preview (1 week before recorded date)
-           0  : full brightness (recorded date)
-          1..window_size-2 : linear fade from 1.0 toward 0
-          >= window_size-1 : invisible
-        """
-        if offset == -1:
-            return 0.25
+        # power > 1 → fast initial decay, then nearly flat for last ~25-30%
         if offset == 0:
             return 1.0
-        if 1 <= offset < window_size - 1:
-            return 1.0 - offset / (window_size - 1)
+        if 1 <= offset < window_size:
+            return (1.0 - offset / window_size) ** 2.0
         return 0.0
 
-    noise_window = window_size * 4  # noise lingers across many more periods
     def get_noise_alpha_for_offset(offset):
-        if offset == -1:
-            return 0.03
         if offset == 0:
             return 0.10
-        if 1 <= offset < noise_window - 1:
-            return 0.10 * (1.0 - offset / (noise_window - 1))
+        if 1 <= offset < noise_window:
+            return 0.10 * (1.0 - offset / noise_window) ** 0.4
         return 0.0
 
-    def draw_rolling_frame(current_idx, progress_in=0.0, progress_out=0.0):
-        """
-        Draw the rolling window centred on current_idx.
-          progress_in  [0,1]: how far the incoming period (offset -1 → 0) has brightened
-          progress_out [0,1]: how far all existing periods (offset n → n+1) have aged/dimmed
-        Both reach 1.0 when their respective transition is complete.
-        """
-        p_in  = (1 - np.cos(progress_in  * np.pi)) / 2
-        p_out = (1 - np.cos(progress_out * np.pi)) / 2
+    # Glow layers: many thin concentric rings with exponential alpha falloff
+    # gives a soft gaussian-like bloom rather than hard rings.
+    # sizes decrease toward core; alphas increase (outer is barely visible)
+    _glow_layers = list(zip(
+        [s * glow_size for s in [130, 105, 83, 64, 49, 37, 27, 19, 13]],
+        [0.004, 0.007, 0.011, 0.018, 0.03, 0.05, 0.08, 0.13, 0.20],
+    ))
 
+    # ── Draw a single frame ───────────────────────────────────────────────────
+    def draw_frame(day_idx, n_visible):
+        """
+        day_idx   : which day is 'current'
+        n_visible : how many of today's time-ordered watches to show (0 → N)
+        """
         while ax.collections:
             ax.collections[-1].remove()
 
-        # ── Noise pass (wide window, no glow, dim) ──────────────────────────
-        p_lo_noise = max(0, current_idx - (noise_window - 2))
-        p_hi_noise = min(len(periods), current_idx + 2)
-        for p_idx in range(p_lo_noise, p_hi_noise):
-            offset = current_idx - p_idx
-            p = p_in if offset < 0 else p_out
-            noise_alpha = (1 - p) * get_noise_alpha_for_offset(offset) \
-                        + p       * get_noise_alpha_for_offset(offset + 1)
-            if noise_alpha <= 0:
-                continue
-            p_umapped, p_colors, p_is_noise = period_data[p_idx]
-            if not p_is_noise.any():
-                continue
-            ax.scatter(p_umapped[0].values[p_is_noise], p_umapped[1].values[p_is_noise],
-                       s=12, alpha=noise_alpha, color='grey', linewidths=0, zorder=1)
-
-        # ── Cluster pass (normal window, glow, full brightness) ──────────────
-        p_lo = max(0, current_idx - (window_size - 2))
-        p_hi = min(len(periods), current_idx + 2)  # +1 preview, +1 for next-step preview
-        for p_idx in range(p_lo, p_hi):
-            offset = current_idx - p_idx
-            # offset=-1 is the incoming preview — use progress_in
-            # offset>=0 are existing/aging periods — use progress_out
-            p = p_in if offset < 0 else p_out
-            alpha = (1 - p) * get_alpha_for_offset(offset) \
-                  + p       * get_alpha_for_offset(offset + 1)
-
+        # Noise pass — wide window, no glow, dim
+        for d_idx in range(max(0, day_idx - noise_window + 1), day_idx + 1):
+            offset = day_idx - d_idx
+            alpha  = get_noise_alpha_for_offset(offset)
             if alpha <= 0:
                 continue
-
-            p_umapped, p_colors, p_is_noise = period_data[p_idx]
-            non_noise = ~p_is_noise
-            if not non_noise.any():
+            umap_sub, colors, is_noise = day_umap_data[d_idx]
+            n = n_visible if d_idx == day_idx else len(umap_sub)
+            if n == 0 or not is_noise[:n].any():
                 continue
+            ax.scatter(umap_sub[0].values[:n][is_noise[:n]],
+                       umap_sub[1].values[:n][is_noise[:n]],
+                       s=12, alpha=alpha, color='grey', linewidths=0, zorder=1)
 
-            xu = p_umapped[0].values[non_noise]
-            yu = p_umapped[1].values[non_noise]
-            pc = p_colors[non_noise]
+        # Cluster pass — normal window, glow, full brightness
+        for d_idx in range(max(0, day_idx - window_size + 1), day_idx + 1):
+            offset = day_idx - d_idx
+            alpha  = get_alpha_for_offset(offset)
+            if alpha <= 0:
+                continue
+            umap_sub, colors, is_noise = day_umap_data[d_idx]
+            n         = n_visible if d_idx == day_idx else len(umap_sub)
+            non_noise = ~is_noise[:n]
+            if n == 0 or not non_noise.any():
+                continue
+            xu = umap_sub[0].values[:n][non_noise]
+            yu = umap_sub[1].values[:n][non_noise]
+            pc = colors[:n][non_noise]
+            for size, ga in _glow_layers:
+                ax.scatter(xu, yu, s=size, alpha=ga * alpha, color=pc, linewidths=0, zorder=3)
+            ax.scatter(xu, yu, s=20 * glow_size, alpha=alpha, color=pc, linewidths=0, zorder=4)
 
-            # Glow layers
-            for size, glow_alpha in [(350, 0.05), (150, 0.05), (100, 0.1), (50, 0.3)]:
-                ax.scatter(xu, yu, s=size, alpha=glow_alpha * alpha,
-                           color=pc, linewidths=0, zorder=3)
-            # Core points
-            ax.scatter(xu, yu, s=45, alpha=alpha, color=pc, linewidths=0, zorder=4)
+        # Re-enforce limits — savefig can re-expand them even with autoscale off
+        ax.set_xlim(x_c - x_h, x_c + x_h)
+        ax.set_ylim(y_c - y_h, y_c + y_h)
 
-    steps_in  = max(n_fade_in_frames  - 1, 1)
-    steps_out = max(n_fade_out_frames - 1, 1)
-    n_transition_frames = max(n_fade_in_frames, n_fade_out_frames)
-
-    for i, period in tqdm(enumerate(periods)):
-        # Transition from period i-1 → i.
-        # Each progress independently clamps to 1.0 at its own rate.
-        for t in range(n_transition_frames):
-            if i == 0:
-                draw_rolling_frame(0, progress_in=0.0, progress_out=0.0)
-            else:
-                p_in  = min(t / steps_in,  1.0)
-                p_out = min(t / steps_out, 1.0)
-                draw_rolling_frame(i - 1, progress_in=p_in, progress_out=p_out)
+    # ── Main loop ─────────────────────────────────────────────────────────────
+    frame_idx = 0
+    for day_idx, day in tqdm(enumerate(days), total=len(days), desc='Rendering'):
+        n_today = len(day_ordered_ids[day_idx])
+        for f in range(frames_per_day):
+            n_visible = round((f + 1) / frames_per_day * n_today)
+            draw_frame(day_idx, n_visible)
             fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png', transparent=True)
             frame_idx += 1
-
-        # Hold on this period
-        # for _ in range(9):
-        #     draw_rolling_frame(i, progress_in=0.0, progress_out=0.0)
-        #     fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png', transparent=True)
-        #     frame_idx += 1
-
-        print(f'Rendered {period} ({frame_idx} frames total)')
+        print(f'Rendered {day} ({frame_idx} frames total)')
 
     plt.close(fig)
-    print(f'Done — {frame_idx} frames saved to {output_dir}/')
+    print(f'Done — {frame_idx} frames at {fps}fps → {frame_idx/fps:.1f}s saved to {output_dir}/')
 
 render_range = watch_data[(watch_data['date'].dt.to_period('M')>='2024-01') & (watch_data['date'].dt.to_period('M')<='2024-12')].copy()
 
-render_range = watch_data[(watch_data['date'].dt.to_period('D')>='2024-01-01') & (watch_data['date'].dt.to_period('D')<='2024-01-05')].copy()
+render_range = watch_data[(watch_data['date'].dt.to_period('D')>='2024-01-01') & (watch_data['date'].dt.to_period('D')<='2024-02-01')].copy()
 
 render_frames(
-    df=render_range,
+    df=watch_data,
     umapped=clustered_embeddings,
     combined_embeddings=clustered_embeddings,
-    categories=categories,
-    output_dir='charts/frames_v5',
-    n_fade_in_frames=15,
-    n_fade_out_frames=30,
+    output_dir='charts/frames_v8',
+    fps=30,
+    seconds_per_day=0.2,
+    window_size=15,
+    glow_size=1.5
 )
