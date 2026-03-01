@@ -9,6 +9,7 @@ from datetime import datetime
 import re
 from tqdm import tqdm
 import random
+from importlib import reload
 
 # data vis
 import seaborn as sns
@@ -229,8 +230,9 @@ clusterer = HDBSCAN(min_cluster_size=50, min_samples=10, metric='euclidean')
 labels = clusterer.fit_predict(umap_embeddings)
 clustered_embeddings = pd.DataFrame(umap_embeddings, index=composed_embeddings.index)
 clustered_embeddings['hdbscan_label'] = labels
-clustered_embeddings['channel'] = clustered_embeddings.index.map(watch_data.set_index('id')['channel_title'].to_dict()).fillna('None')
-clustered_embeddings['categories'] = clustered_embeddings.index.map(categories).fillna('None')
+# clustered_embeddings['channel'] = clustered_embeddings.index.map(watch_data.set_index('id')['channel_title'].to_dict()).fillna('None')
+# clustered_embeddings['categories'] = clustered_embeddings.index.map(categories).fillna('None')
+clustered_embeddings['duration'] = clustered_embeddings.index.map(mdata_nlp['duration']).fillna('None')
 print('Number of HDBSCAN clusters: ', clustered_embeddings['hdbscan_label'].nunique())
 print('Cluster Sizes: ', clustered_embeddings['hdbscan_label'].value_counts().head(10))
 
@@ -253,6 +255,10 @@ for label, group in clustered_embeddings[clustered_embeddings['hdbscan_label'] !
 # noise points (label == -1 from HDBSCAN) styled separately
 noise = clustered_embeddings[clustered_embeddings['hdbscan_label'] == -1]
 ax.scatter(noise[0], noise[1], c='lightgrey', s=2, alpha=0.3, linewidths=0)
+
+plt.yticks(np.arange(-20, 35, 2.5))
+plt.xticks(np.arange(-20, 40, 2.5))
+plt.grid(True)
 plt.tight_layout()
 
 # handles = [Patch(color=hdbscan_colours[cluster], label=cluster) for cluster in clustered_embeddings['hdbscan_label'].unique()]
@@ -268,10 +274,10 @@ def sample_links(ids, n=2):
 # ── Choose random cluster ────────────────────────────────────────────────────
 valid_labels = [l for l in labels if l != -1]
 s = random.sample(list(set(valid_labels)), 1)[0]
-s = 195
+s = 22
 s_df = clustered_embeddings[clustered_embeddings['hdbscan_label'] == s].copy()
 s_ids = s_df.index.tolist()
-print('Videos in cluster: ', len(s_df))
+print(f'Videos in cluster {s}: ', len(s_df))
 s_watch_data = watch_data[watch_data['id'].isin(s_ids)].copy()
 print('Watched from: ', s_watch_data['date'].min(), ' to ', s_watch_data['date'].max())
 
@@ -349,169 +355,30 @@ for tag, count in tag_counts.most_common(20):
     print(f'  {count:>4}  {tag:<25} {sample_links(tag_to_ids[tag])}')
 
 
-# ====== UMAP Animation ======
-def render_frames(df, umapped, combined_embeddings, output_dir,
-                  fps=30, seconds_per_day=0.2,
-                  window_size=7, noise_window_multiplier=4,
-                  glow_size=1.0):
-    """
-    fps / seconds_per_day → frames_per_day = round(fps * seconds_per_day)
-      e.g. 30fps × 0.2s = 6 frames per day.
+# ====== Clustering Animation ======
+import animation_rendering
+reload(animation_rendering)
 
-    Within each day, watches are revealed in chronological order across
-    frames_per_day frames. The rolling window (window_size days) fades
-    previous days by day-offset, not frame-offset.
-
-    Stitch output with:
-      ffmpeg -r {fps} -i frame_%05d.png -c:v libx264 -pix_fmt yuv420p out.mp4
-    """
-    frames_per_day = max(1, round(fps * seconds_per_day))
-    noise_window   = window_size * noise_window_multiplier
-    print(f'frames_per_day={frames_per_day}  window_size={window_size}  noise_window={noise_window}')
-    print(f'Activities with embeddings: {len(df[df["id"].isin(combined_embeddings.index)])}')
-
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
-    os.makedirs(output_dir)
-
-    days = sorted(df['date'].dt.to_period('D').unique())
-
-    fig, ax = plt.subplots(figsize=(16, 9), dpi=300)  # 3840×2160 (4K)
-    fig.patch.set_alpha(1)
-    ax.patch.set_alpha(0)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    for spine in ax.spines.values():
-        spine.set_visible(False)
-
-    pad = 0.5
-    x_min, x_max = umapped[0].min() - pad, umapped[0].max() + pad
-    y_min, y_max = umapped[1].min() - pad, umapped[1].max() + pad
-    x_c, y_c = (x_min + x_max) / 2, (y_min + y_max) / 2
-    x_h, y_h = (x_max - x_min) / 2 / 1.35, (y_max - y_min) / 2 / 1.35
-    ax.set_xlim(x_c - x_h, x_c + x_h)
-    ax.set_ylim(y_c - y_h, y_c + y_h)
-    ax.set_autoscale_on(False)  # prevent scatter calls inside draw_frame from resetting limits
-
-    # ── Pre-cache: one entry per day, watches in chronological order ──────────
-    day_ordered_ids = []  # list[list[str]]
-    day_umap_data   = []  # list[(umap_df, colors_arr, is_noise_arr)]
-
-    for day in tqdm(days, desc='Pre-caching days'):
-        day_df = df[df['date'].dt.to_period('D') == day].sort_values('date')
-        seen, ordered = set(), []
-        for vid_id in day_df['id']:
-            if vid_id not in seen and vid_id in combined_embeddings.index:
-                seen.add(vid_id)
-                ordered.append(vid_id)
-        day_ordered_ids.append(ordered)
-
-        if ordered:
-            umap_sub = combined_embeddings.loc[ordered]
-            labels   = umap_sub['hdbscan_label'].values
-            colors   = np.array([hdbscan_colours.get(l, (0.6, 0.6, 0.6, 1.0)) for l in labels])
-            is_noise = (labels == -1)
-        else:
-            umap_sub = combined_embeddings.iloc[:0]  # empty
-            colors   = np.empty((0, 4))
-            is_noise = np.empty(0, dtype=bool)
-        day_umap_data.append((umap_sub, colors, is_noise))
-        print(f'  {day}: {len(ordered)} embeddable watches')
-
-    # ── Alpha functions (offset = day_idx_current - day_idx_past) ────────────
-    def get_alpha_for_offset(offset):
-        # power > 1 → fast initial decay, then nearly flat for last ~25-30%
-        if offset == 0:
-            return 1.0
-        if 1 <= offset < window_size:
-            return (1.0 - offset / window_size) ** 2.0
-        return 0.0
-
-    def get_noise_alpha_for_offset(offset):
-        if offset == 0:
-            return 0.10
-        if 1 <= offset < noise_window:
-            return 0.10 * (1.0 - offset / noise_window) ** 0.4
-        return 0.0
-
-    # Glow layers: many thin concentric rings with exponential alpha falloff
-    # gives a soft gaussian-like bloom rather than hard rings.
-    # sizes decrease toward core; alphas increase (outer is barely visible)
-    _glow_layers = list(zip(
-        [s * glow_size for s in [130, 105, 83, 64, 49, 37, 27, 19, 13]],
-        [0.004, 0.007, 0.011, 0.018, 0.03, 0.05, 0.08, 0.13, 0.20],
-    ))
-
-    # ── Draw a single frame ───────────────────────────────────────────────────
-    def draw_frame(day_idx, n_visible):
-        """
-        day_idx   : which day is 'current'
-        n_visible : how many of today's time-ordered watches to show (0 → N)
-        """
-        while ax.collections:
-            ax.collections[-1].remove()
-
-        # Noise pass — wide window, no glow, dim
-        for d_idx in range(max(0, day_idx - noise_window + 1), day_idx + 1):
-            offset = day_idx - d_idx
-            alpha  = get_noise_alpha_for_offset(offset)
-            if alpha <= 0:
-                continue
-            umap_sub, colors, is_noise = day_umap_data[d_idx]
-            n = n_visible if d_idx == day_idx else len(umap_sub)
-            if n == 0 or not is_noise[:n].any():
-                continue
-            ax.scatter(umap_sub[0].values[:n][is_noise[:n]],
-                       umap_sub[1].values[:n][is_noise[:n]],
-                       s=12, alpha=alpha, color='grey', linewidths=0, zorder=1)
-
-        # Cluster pass — normal window, glow, full brightness
-        for d_idx in range(max(0, day_idx - window_size + 1), day_idx + 1):
-            offset = day_idx - d_idx
-            alpha  = get_alpha_for_offset(offset)
-            if alpha <= 0:
-                continue
-            umap_sub, colors, is_noise = day_umap_data[d_idx]
-            n         = n_visible if d_idx == day_idx else len(umap_sub)
-            non_noise = ~is_noise[:n]
-            if n == 0 or not non_noise.any():
-                continue
-            xu = umap_sub[0].values[:n][non_noise]
-            yu = umap_sub[1].values[:n][non_noise]
-            pc = colors[:n][non_noise]
-            for size, ga in _glow_layers:
-                ax.scatter(xu, yu, s=size, alpha=ga * alpha, color=pc, linewidths=0, zorder=3)
-            ax.scatter(xu, yu, s=20 * glow_size, alpha=alpha, color=pc, linewidths=0, zorder=4)
-
-        # Re-enforce limits — savefig can re-expand them even with autoscale off
-        ax.set_xlim(x_c - x_h, x_c + x_h)
-        ax.set_ylim(y_c - y_h, y_c + y_h)
-
-    # ── Main loop ─────────────────────────────────────────────────────────────
-    frame_idx = 0
-    for day_idx, day in tqdm(enumerate(days), total=len(days), desc='Rendering'):
-        n_today = len(day_ordered_ids[day_idx])
-        for f in range(frames_per_day):
-            n_visible = round((f + 1) / frames_per_day * n_today)
-            draw_frame(day_idx, n_visible)
-            fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png', transparent=True)
-            frame_idx += 1
-        print(f'Rendered {day} ({frame_idx} frames total)')
-
-    plt.close(fig)
-    print(f'Done — {frame_idx} frames at {fps}fps → {frame_idx/fps:.1f}s saved to {output_dir}/')
-
-render_range = watch_data[(watch_data['date'].dt.to_period('M')>='2024-01') & (watch_data['date'].dt.to_period('M')<='2024-12')].copy()
-
-render_range = watch_data[(watch_data['date'].dt.to_period('D')>='2024-01-01') & (watch_data['date'].dt.to_period('D')<='2024-02-01')].copy()
-
-render_frames(
-    df=watch_data,
-    umapped=clustered_embeddings,
-    combined_embeddings=clustered_embeddings,
-    output_dir='charts/frames_v8',
+renderer = animation_rendering.UMAPAnimationRenderer(
     fps=30,
     seconds_per_day=0.2,
     window_size=15,
-    glow_size=1.5
+    glow_size=1.5,
+    scale_by_duration=True,
+    noise_duration_min_size=4,
+    noise_duration_max_size=150
+)
+
+render_range = watch_data[(watch_data['date'].dt.to_period('M')>='2024-01') & (watch_data['date'].dt.to_period('M')<='2024-12')].copy()
+
+render_range = watch_data[(watch_data['date'].dt.to_period('D')>='2025-01-01') & (watch_data['date'].dt.to_period('D')<='2025-03-01')].copy()
+
+# Quick single-frame preview — run this to iterate on visuals without a full render
+# renderer.sample_frame(render_range, clustered_embeddings, hdbscan_colours, day_idx=0, save_path='charts/sample_frame.svg')
+
+renderer.render(
+    df=render_range,
+    combined_embeddings=clustered_embeddings,
+    hdbscan_colours=hdbscan_colours,
+    output_dir='charts/frames_v9'
 )

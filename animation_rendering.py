@@ -3,6 +3,7 @@ import os
 import shutil
 from tqdm import tqdm
 import numpy as np
+import pandas as pd
 
 # ====== UMAP Animation ======
 class UMAPAnimationRenderer:
@@ -35,8 +36,8 @@ class UMAPAnimationRenderer:
         window_size: int = 7,               # days cluster points remain visible
         noise_window_multiplier: int = 4,   # noise window = window_size × noise_window_multiplier
         # ── Figure layout ─────────────────────────────────────────────────────
-        figsize: tuple = (16, 9),           # inches; (16,9) @ dpi=300 → 4800×2700px
-        dpi: int = 300,
+        figsize: tuple = (19.2, 10.8),           # inches; (16,9) @ dpi=300 → 4800×2700px
+        dpi: int = 150,
         # ── Axis viewport ─────────────────────────────────────────────────────
         axis_padding: float = 0.5,          # blank margin around embedding extent
         axis_zoom: float = 1.35,            # crop factor > 1 zooms in slightly
@@ -48,10 +49,14 @@ class UMAPAnimationRenderer:
         cluster_alpha_decay: float = 2.0,   # power > 1 → fast initial drop, flatter tail
         # ── Noise point styling ───────────────────────────────────────────────
         noise_point_size: float = 12.0,
-        noise_base_alpha: float = 0.20,     # max alpha for noise points (dim background)
+        noise_base_alpha: float = 0.45,     # max alpha for noise points (dim background)
         noise_alpha_decay: float = 0.4,     # power < 1 → slow decay (noise lingers)
         noise_color: str = 'grey',
         noise_fallback_color: tuple = (0.6, 0.6, 0.6, 1.0),  # color for unlabelled clusters
+        # ── Duration-based noise point scaling ────────────────────────────────
+        scale_by_duration: bool = False,  # enable sigmoid size scaling for noise points
+        noise_duration_min_size: float = 4.0,   # size for shortest videos
+        noise_duration_max_size: float = 30.0,  # size for longest videos
     ):
         # ── Timing ────────────────────────────────────────────────────────────
         self.fps = fps
@@ -89,6 +94,9 @@ class UMAPAnimationRenderer:
         self.noise_alpha_decay = noise_alpha_decay
         self.noise_color = noise_color
         self.noise_fallback_color = noise_fallback_color
+        self.scale_by_duration = scale_by_duration
+        self.noise_duration_min_size = noise_duration_min_size
+        self.noise_duration_max_size = noise_duration_max_size
 
         # ── Internal state (populated lazily during render / sample_frame) ────
         self.fig = None
@@ -171,6 +179,9 @@ class UMAPAnimationRenderer:
         self._day_ordered_ids = []
         self._day_umap_data   = []
 
+        # Pre-compute sigmoid duration sizes for every video in one pass
+        _dur_sizes = self._compute_duration_sizes(combined_embeddings) if self.scale_by_duration else None
+
         for day in tqdm(self._days, desc='Pre-caching days'):
             # All watches for this day, sorted oldest-first
             day_df = df[df['date'].dt.to_period('D') == day].sort_values('date')
@@ -191,13 +202,15 @@ class UMAPAnimationRenderer:
                     hdbscan_colours.get(l, self.noise_fallback_color) for l in labels
                 ])
                 is_noise = (labels == -1)
+                sizes    = _dur_sizes.reindex(umap_sub.index).fillna(self.noise_point_size).values if _dur_sizes is not None else None
             else:
                 # Empty arrays so _draw_frame can safely slice without branching
                 umap_sub = combined_embeddings.iloc[:0]
                 colors   = np.empty((0, 4))
                 is_noise = np.empty(0, dtype=bool)
+                sizes    = np.empty(0) if _dur_sizes is not None else None
 
-            self._day_umap_data.append((umap_sub, colors, is_noise))
+            self._day_umap_data.append((umap_sub, colors, is_noise, sizes))
             # print(f'  {day}: {len(ordered)} embeddable watches')
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -233,6 +246,40 @@ class UMAPAnimationRenderer:
         return 0.0
 
     # ──────────────────────────────────────────────────────────────────────────
+    # Duration size scaling
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _compute_duration_sizes(self, combined_embeddings):
+        """
+        Map each video's duration to a point size via a sigmoid on log-duration.
+
+        Log scale is used because durations are heavy-tailed (most videos are
+        short; a few are very long). The sigmoid is centred at the log-median
+        with a gentle slope (0.8 / log_std) so the size difference between
+        the extremes (very short / very long) is compressed — both ends stay
+        near noise_duration_min_size / noise_duration_max_size rather than
+        spreading linearly across the full range.
+        """
+        dur = pd.to_numeric(combined_embeddings['duration'], errors='coerce')
+        median = dur.median()
+        if np.isnan(median) or median <= 0:
+            median = 1.0
+        dur_filled = dur.fillna(median).clip(lower=1)
+
+        log_dur = np.log(dur_filled.values)
+        log_med = np.log(median)
+        log_std = log_dur.std()
+        if log_std == 0:
+            log_std = 1.0
+
+        # Gentle sigmoid: 0.8 stddev per unit keeps extremes compressed
+        k = 0.8 / log_std
+        sig = 1.0 / (1.0 + np.exp(-k * (log_dur - log_med)))
+
+        sizes = self.noise_duration_min_size + (self.noise_duration_max_size - self.noise_duration_min_size) * sig
+        return pd.Series(sizes, index=combined_embeddings.index)
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Frame drawing
     # ──────────────────────────────────────────────────────────────────────────
 
@@ -264,16 +311,18 @@ class UMAPAnimationRenderer:
             if alpha <= 0:
                 continue
 
-            umap_sub, colors, is_noise = self._day_umap_data[d_idx]
+            umap_sub, colors, is_noise, sizes = self._day_umap_data[d_idx]
             # Today: show only n_visible; past days: show everything
             n = n_visible if d_idx == day_idx else len(umap_sub)
             if n == 0 or not is_noise[:n].any():
                 continue
 
+            noise_mask = is_noise[:n]
+            noise_s = sizes[:n][noise_mask] if (self.scale_by_duration and sizes is not None) else self.noise_point_size
             self.ax.scatter(
-                umap_sub[0].values[:n][is_noise[:n]],
-                umap_sub[1].values[:n][is_noise[:n]],
-                s=self.noise_point_size, alpha=alpha,
+                umap_sub[0].values[:n][noise_mask],
+                umap_sub[1].values[:n][noise_mask],
+                s=noise_s, alpha=alpha,
                 color=self.noise_color, linewidths=0, zorder=1,
             )
 
@@ -284,7 +333,7 @@ class UMAPAnimationRenderer:
             if alpha <= 0:
                 continue
 
-            umap_sub, colors, is_noise = self._day_umap_data[d_idx]
+            umap_sub, colors, is_noise, sizes = self._day_umap_data[d_idx]
             n = n_visible if d_idx == day_idx else len(umap_sub)
             non_noise = ~is_noise[:n]
             if n == 0 or not non_noise.any():
@@ -294,16 +343,20 @@ class UMAPAnimationRenderer:
             yu = umap_sub[1].values[:n][non_noise]
             pc = colors[:n][non_noise]
 
+            # Per-point core size; scale factor used to proportionally resize glow rings
+            cluster_s = sizes[:n][non_noise] if (self.scale_by_duration and sizes is not None) else self._core_point_size
+            scale = cluster_s / self._core_point_size  # scalar 1.0 or per-point array
+
             # Render glow rings from outermost (large, faint) to innermost (small, bright)
             for size, ring_alpha in self._glow_layers:
                 self.ax.scatter(
-                    xu, yu, s=size, alpha=ring_alpha * alpha,
-                    color=pc, linewidths=2.5, zorder=3,
+                    xu, yu, s=size * scale, alpha=ring_alpha * alpha,
+                    color=pc, linewidths=1, zorder=3,
                 )
 
             # Solid core dot on top of the glow stack
             self.ax.scatter(
-                xu, yu, s=self._core_point_size, alpha=alpha,
+                xu, yu, s=cluster_s, alpha=alpha,
                 color=pc, linewidths=0, zorder=4,
             )
 
@@ -354,7 +407,7 @@ class UMAPAnimationRenderer:
                 # the last frame shows all of today's watches
                 n_visible = round((f + 1) / self.frames_per_day * n_today)
                 self._draw_frame(day_idx, n_visible)
-                self.fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png', transparent=True)
+                self.fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.svg', transparent=True)
                 frame_idx += 1
             print(f'Rendered {day} ({frame_idx} frames total)')
 
