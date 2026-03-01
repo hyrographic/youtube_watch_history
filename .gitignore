@@ -219,3 +219,5 @@ charts/frames*
 www.youtube.com_cookies.txt
 
 data/embeddings_cache
+
+renders/*.mp4
