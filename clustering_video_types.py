@@ -65,6 +65,10 @@ read_and_load_data.metadata_group_errors(metadata_df)
 mdata_nlp = metadata_df.drop_duplicates(subset=['id']).dropna(subset=['id'])
 mdata_nlp.set_index('id', inplace=True)
 
+# remove any livestreams
+livestreams = mdata_nlp[mdata_nlp['media_type'] == 'livestream'].index
+mdata_nlp.drop(index=livestreams, inplace=True)
+
 media_types_dict = mdata_nlp['media_type'].to_dict()
 
 categories = mdata_nlp['categories'].apply(lambda d: d[0] if isinstance(d, list) else 'None')
@@ -198,98 +202,171 @@ single_month_ids = single_month['id'].unique().tolist()
 mask = composed_embeddings.index.isin(single_month_ids)
 masked_cats = composed_cats.loc[mask]
 
-# video_embeddings = composed_embeddings[composed_embeddings.index.map(media_types_dict) == 'video']
-@numba.njit()
-def hue(r, g, b):
-    cmax = max(r, g, b)
-    cmin = min(r, g, b)
-    delta = cmax - cmin
-    if cmax == r:
-        return ((g - b) / delta) % 6
-    elif cmax == g:
-        return ((b - r) / delta) + 2
-    else:
-        return ((r - g) / delta) + 4
-
-@numba.njit()
-def lightness(r, g, b):
-    cmax = max(r, g, b)
-    cmin = min(r, g, b)
-    return (cmax + cmin) / 2.0
-
-@numba.njit()
-def saturation(r, g, b):
-    cmax = max(r, g, b)
-    cmin = min(r, g, b)
-    chroma = cmax - cmin
-    light = lightness(r, g, b)
-    if light == 1:
-        return 0
-    else:
-        return chroma / (1 - abs(2*light - 1))
-
-@numba.njit()
-def hsl_dist(a, b):
-    a_sat = saturation(a[0], a[1], a[2])
-    b_sat = saturation(b[0], b[1], b[2])
-    a_light = lightness(a[0], a[1], a[2])
-    b_light = lightness(b[0], b[1], b[2])
-    a_hue = hue(a[0], a[1], a[2])
-    b_hue = hue(b[0], b[1], b[2])
-    return (a_sat - b_sat)**2 + (a_light - b_light)**2 + (((a_hue - b_hue) % 6) / 6.0)
-
-
 n_components = 2
 n_neighbors = 16  # low = local structure / sub-clusters; high = global topology
 
-dim_reduction_model = umap.UMAP(output_metric='haversine', random_state=42).fit(composed_embeddings)
-
-# dim_reduction_model = PCA(n_components==n_components)
-
-# dim_reduction_model = umap.UMAP(
-#     n_neighbors=n_neighbors,
-#     min_dist=0.0,   # 0 = maximum internal compactness
-#     spread=3.0,     # spread clusters apart from each other (pairs with min_dist)
-#     n_components=n_components,
-#     # metric='correlation'
-# )
+dim_reduction_model = umap.UMAP(
+    n_neighbors=n_neighbors,
+    min_dist=0.0,   # 0 = maximum internal compactness
+    spread=3.0,     # spread clusters apart from each other (pairs with min_dist)
+    n_components=n_components,
+    # metric='correlation'
+)
 umap_embeddings = pd.DataFrame(dim_reduction_model.fit_transform(composed_embeddings), index=composed_embeddings.index)
+umap_cats = categories.loc[umap_embeddings.index].copy()
+
+# ── Per-category HDBSCAN sub-clustering ──────────────────────────────────────
+_sub_clusterer = HDBSCAN(min_cluster_size=30, min_samples=5, metric='euclidean', copy=True)
+sub_labels = pd.Series(-1, index=umap_embeddings.index, name='sub_label', dtype=int)
+for cat, idx in umap_cats.groupby(umap_cats).groups.items():
+    pts = umap_embeddings.loc[idx]
+    if len(pts) < _sub_clusterer.min_cluster_size:
+        continue
+    local_labels = _sub_clusterer.fit_predict(pts)
+    sub_labels.loc[idx] = local_labels
+    # print('Category: ', cat)
+    # print('Num watches: ', len(local_labels))
+    # print('Num sub-clusters: ', len(set(local_labels)))
+    # print('\n')
+    
+# ── Visualisation mode ────────────────────────────────────────────────────────
+COLOR_BY = 'subcluster'   # 'subcluster' | 'channel' | 'category'
+SHAPE_MODE = True        # True → marker shape also encodes COLOR_BY variable
+
+import colorsys
 
 palette = sns.color_palette('tab20', 16)
-colours = {cat: palette[i] for i, cat in enumerate(composed_cats.unique())}
-umap_colors = composed_cats.map(colours)
+cat_colours = {cat: palette[i] for i, cat in enumerate(umap_cats.unique())}
 
-# umap_month = umap_embeddings[mask]
-# month_colors = masked_cats.map(colours)
+if COLOR_BY == 'subcluster':
+    # Vary hue in HSV space around each category's base hue
+    colour_map: dict = {}
+    for cat in umap_cats.unique():
+        base_rgb = cat_colours[cat]
+        h, s, v = colorsys.rgb_to_hsv(*base_rgb)
+        sub_ids = sorted(sub_labels[umap_cats == cat].unique())
+        n_real = [x for x in sub_ids if x != -1]
+        real_idx = {sub: i for i, sub in enumerate(n_real)}  # own 0-based index
+        n = len(n_real)
+        hue_spread = min(0.28, n * 0.06)   # grows with count, max ≈100°
+        for sub in sub_ids:
+            if sub == -1:
+                colour_map[(cat, sub)] = colorsys.hsv_to_rgb(h, s * 0.25, v * 0.30)
+            else:
+                t = real_idx[sub] / max(n - 1, 1)
+                new_h = (h + (t - 0.5) * hue_spread) % 1.0
+                new_s = float(np.clip(s * (0.6 + 0.8 * t), 0, 1))  # low→high sat
+                new_v = 0.65 + 0.35 * t                              # dark→bright
+                colour_map[(cat, sub)] = colorsys.hsv_to_rgb(new_h, new_s, new_v)
+    umap_colors = [colour_map[(cat, sub)] for cat, sub in zip(umap_cats, sub_labels)]
+    shape_values = sub_labels.values
 
-um = umap_embeddings.values
-c = umap_colors
+elif COLOR_BY == 'channel':
+    id_to_channel = watch_data.set_index('id')['channel_title'].to_dict()
+    channels = pd.Series(umap_embeddings.index.map(id_to_channel), index=umap_embeddings.index).fillna('Unknown')
+    top_channels = channels.value_counts().head(19).index.tolist()
+    ch_palette = sns.color_palette('tab20', 20)
+    ch_colours = {ch: ch_palette[i] for i, ch in enumerate(top_channels)}
+    umap_colors = [ch_colours.get(ch, (0.45, 0.45, 0.45)) for ch in channels]
+    shape_values = channels.values
 
-# exclude = composed_cats[~composed_cats.isin([
-#     'People & Blogs'
-# ])]
-# um = umap_embeddings.loc[exclude.index].values
-# c = composed_cats.loc[exclude.index].map(colours)
+else:
+    umap_colors = list(umap_cats.map(cat_colours))
+    shape_values = umap_cats.values
 
-x = np.sin(dim_reduction_model.embedding_[:, 0]) * np.cos(dim_reduction_model.embedding_[:, 1])
-y = np.sin(dim_reduction_model.embedding_[:, 0]) * np.sin(dim_reduction_model.embedding_[:, 1])
-z = np.cos(dim_reduction_model.embedding_[:, 0])
+# Marker cycle for SHAPE_MODE
+_markers = ['o', 's', '^', 'D', 'v', 'p', 'h', 'P', '*', 'X']
+if SHAPE_MODE:
+    unique_shape_vals = list(dict.fromkeys(shape_values))  # preserve order
+    shape_marker = {v: _markers[i % len(_markers)] for i, v in enumerate(unique_shape_vals)}
+else:
+    shape_marker = None  # single scatter pass
 
-# fig = plt.figure(figsize=(19, 10), dpi=300)
-# if n_components == 2:
-#     ax = fig.add_subplot(111)
-#     ax.scatter(um[:,0], um[:,1], c=c, s=3, alpha=0.5)
-#     # ax.set_ylim(-10, 10)
-#     # ax.set_xlim(0, 20)
+# ── Circular layout: anchor category centroids around the perimeter ───────────
+# 1. Compute per-category centroid in raw UMAP space
+cats_series = umap_cats.loc[umap_embeddings.index]
+cat_order = cats_series.value_counts().index.tolist()  # sort by count so dense cats get spread
+n_cats = len(cat_order)
+cat_angles = {cat: 2 * np.pi * i / n_cats for i, cat in enumerate(cat_order)}
 
-fig = plt.figure(figsize=(19, 10), dpi=300)
-ax = fig.add_subplot(111, projection='3d')
-ax.scatter(x, y, z, c=c, s=1, alpha=0.25, cmap='Spectral')
+raw_centroids = {
+    cat: umap_embeddings.loc[cats_series == cat].values.mean(axis=0)
+    for cat in cat_order
+}
 
-handles = [Patch(color=colours[cat], label=cat) for cat in colours]
-ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.05),ncol=4, frameon=False)
+# 2. For each point, rotate+translate so its category centroid maps to target angle on unit circle
+coords_circ = np.empty_like(umap_embeddings.values)
+for cat in cat_order:
+    idx = cats_series[cats_series == cat].index
+    pts = umap_embeddings.loc[idx].values  # (N, 2)
+    cent = raw_centroids[cat]
+    target_angle = cat_angles[cat]
+    target_r = 1  # how far out centroid sits on the unit disk
 
-##
+    # Translate to centroid-relative
+    rel = pts - cent
+
+    # Rotate so centroid's own angle (in raw space) aligns to target_angle
+    raw_angle = np.arctan2(cent[1], cent[0])
+    rot = target_angle - raw_angle
+    cos_r, sin_r = np.cos(rot), np.sin(rot)
+    rotated = np.column_stack([
+        rel[:, 0] * cos_r - rel[:, 1] * sin_r,
+        rel[:, 0] * sin_r + rel[:, 1] * cos_r,
+    ])
+
+    # Scale so spread within a category is reasonable
+    spread = np.abs(rel).max() or 1.0
+    rotated /= spread * (2.0 / target_r)  # compress inward
+
+    # Shift centroid to target position on circle
+    tx = target_r * np.cos(target_angle)
+    ty = target_r * np.sin(target_angle)
+    row_mask = umap_embeddings.index.get_indexer(idx)
+    coords_circ[row_mask] = rotated + np.array([tx, ty])
+
+# 3. Plot
+fig = plt.figure(figsize=(14, 14), dpi=300)
+ax = fig.add_subplot(111, aspect='equal')
+ax.set_facecolor('#0f0f0f')
+fig.patch.set_facecolor('#0f0f0f')
+
+# Faint unit circle boundary
+circle = plt.Circle((0, 0), 1.0, color='white', fill=False, lw=0.5, alpha=0.15)
+ax.add_patch(circle)
+
+c_arr = np.array(umap_colors, dtype=float)
+_marker_scale = {'o': 1.0, 's': 0.9, '^': 1.2, 'D': 0.85, 'v': 1.2,
+                 'p': 0.9, 'h': 0.9, 'P': 0.85, '*': 0.5, 'X': 0.85}
+BASE_S = 5
+if SHAPE_MODE and shape_marker is not None:
+    for val, marker in shape_marker.items():
+        mask = shape_values == val
+        ms = BASE_S * _marker_scale.get(marker, 1.0)
+        ax.scatter(coords_circ[mask, 0], coords_circ[mask, 1],
+                   c=c_arr[mask], s=ms, alpha=0.5, linewidths=0, marker=marker)
+else:
+    ax.scatter(coords_circ[:, 0], coords_circ[:, 1], c=c_arr, s=2, alpha=0.45, linewidths=0)
+
+# Category labels at the centroid positions on the perimeter
+for cat in cat_order:
+    angle = cat_angles[cat]
+    lx = 1.12 * np.cos(angle)
+    ly = 1.12 * np.sin(angle)
+    ha = 'left' if np.cos(angle) > 0.1 else ('right' if np.cos(angle) < -0.1 else 'center')
+    ax.text(lx, ly, cat, color=cat_colours[cat], fontsize=7, ha=ha, va='center',
+            fontweight='bold')
+
+ax.set_xlim(-1.35, 1.35)
+ax.set_ylim(-1.35, 1.35)
+ax.axis('off')
+
+handles = [Patch(color=cat_colours[cat], label=cat) for cat in cat_colours]
+ax.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, -0.05),
+          ncol=4, frameon=False, labelcolor='white', fontsize=7)
+
+
+fig.savefig(f'charts/20k Sample Circle {datetime.today().strftime('%d-%mmm %H')}.svg', transparent=True)
 
 #%%
 # ====== HDBSCAN clustering ======
@@ -341,13 +418,28 @@ def sample_links(ids, n=2):
     return '  '.join(f'https://youtube.com/watch?v={i}' for i in sampled)
 
 # ── Choose random cluster ────────────────────────────────────────────────────
-valid_labels = [l for l in labels if l != -1]
-s = random.sample(list(set(valid_labels)), 1)[0]
+# valid_labels = [l for l in labels if l != -1]
+# s = random.sample(list(set(valid_labels)), 1)[0]
 # s = 49
-s_df = clustered_embeddings[clustered_embeddings['hdbscan_label'] == s].copy()
+
+selected_cat = 'Music'
+category_index = composed_cats[composed_cats==selected_cat].index
+
+category_sample = sub_labels.loc[category_index]
+print(f'{selected_cat} cluster: ', category_sample.value_counts())
+
+music_cluster_i = category_sample[category_sample == 4].index
+
+s_df = umap_embeddings[umap_embeddings.index.isin(music_cluster_i)].copy()
 s_ids = s_df.index.tolist()
 print(f'Videos in cluster {s}: ', len(s_df))
 s_watch_data = watch_data[watch_data['id'].isin(s_ids)].copy()
+s_watch_data['media_type'] = s_watch_data['id'].map(mdata_nlp['media_type'])
+s_watch_data['tags'] = s_watch_data['id'].map(mdata_nlp['tags'])
+s_watch_data['categories'] = s_watch_data['id'].map(mdata_nlp['categories'])
+s_watch_data['title'] = s_watch_data['id'].map(mdata_nlp['title'])
+s_watch_data['title_tokens'] = s_watch_data['title'].apply(tokenise)
+
 print('Watched from: ', s_watch_data['date'].min(), ' to ', s_watch_data['date'].max())
 
 # ── Weekly watch bar chart ───────────────────────────────────────────────────
@@ -364,66 +456,59 @@ plt.tight_layout()
 plt.show()
 
 # ── Cluster highlight scatter ────────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(18, 6))
+# fig, ax = plt.subplots(figsize=(18, 6))
 
-mask = clustered_embeddings['hdbscan_label'] != s
-ax.scatter(
-    clustered_embeddings.loc[mask, 0],
-    clustered_embeddings.loc[mask, 1],
-    c='grey', s=2, alpha=0.3, linewidths=0
-)
+# mask = umap_embeddings['hdbscan_label'] != s
+# ax.scatter(
+#     umap_embeddings.loc[mask, 0],
+#     umap_embeddings.loc[mask, 1],
+#     c='grey', s=2, alpha=0.3, linewidths=0
+# )
 
-ax.scatter(
-    s_df[0], s_df[1],
-    c='crimson', s=8, alpha=0.9, linewidths=0,
-    label=f'Cluster {s} (n={len(s_df)})'
-)
+# ax.scatter(
+#     s_df[0], s_df[1],
+#     c='crimson', s=8, alpha=0.9, linewidths=0,
+#     label=f'Cluster {s} (n={len(s_df)})'
+# )
 
-ax.legend(loc='upper right')
-ax.set_title(f'Cluster {s} — position in embedding space')
-ax.axis('off')
-plt.tight_layout()
-plt.show()
+# ax.legend(loc='upper right')
+# ax.set_title(f'Cluster {s} — position in embedding space')
+# ax.axis('off')
+# plt.tight_layout()
+# plt.show()
 
-# ── Channels ────────────────────────────────────────────────────────────────
-print('\n── Top Channels ──')
-channel_counts = s_watch_data['channel_title'].value_counts().head(10)
-for channel, count in channel_counts.items():
-    print(f'  {count:>4}  {channel}')
+# ── Top Vals  ────────────────────────────────────────────────────────────────
+def print_top_n(feature: str, n=25, breakdown='media_type', data=s_watch_data):
+    breakdown_vals = data[breakdown].unique().tolist()
+    media_gby = data.groupby([breakdown])[feature].apply(lambda x: Counter(x).most_common(n))
+    top_feature_by_media = (
+        media_gby
+        .apply(lambda x: sorted(x, reverse=1, key=lambda i: i[1]))
+        .apply(lambda x: x + [('', 0) for i in range(n - len(x))])
+        .explode()
+        .to_frame()
+        .reset_index()
+        .pivot_table(columns=[breakdown], aggfunc=list)
+        .explode(breakdown_vals)
+    )
+    print(f"Top {n} {top_feature_by_media.index[0]} values by {breakdown}")
+    _cols = top_feature_by_media.columns
+    print(''.join(f"{cl:<30}" for cl in _cols))
+    for i, row in top_feature_by_media.iterrows():
+        if all(row.str[1] == 0):
+            continue
+        print(''.join(f"{row[bv][1]:<2} | {row[bv][0]:<28}" for bv in row.index))
+    print('\n')
 
-# ── Title word frequencies ───────────────────────────────────────────────────
-cluster_meta = mdata_nlp[mdata_nlp.index.isin(s_ids)]
+print_top_n('channel_title')
 
-word_to_ids = {}
-for vid_id, title in cluster_meta['title'].dropna().items():
-    for word in tokenise(title):
-        word_to_ids.setdefault(word, []).append(vid_id)
+print_top_n('tags', data=s_watch_data.explode('tags').fillna('**no tags**'))
 
-title_words = Counter({w: len(ids) for w, ids in word_to_ids.items()})
+print_top_n('categories', data=s_watch_data.explode('categories').fillna('**no category**'))
 
-print('\n── Top Title Words ──')
-for word, count in title_words.most_common(20):
-    print(f'  {count:>4}  {word:<25} {sample_links(word_to_ids[word])}')
+print_top_n('title_tokens', data=s_watch_data.explode('title_tokens').dropna())
 
-# ── Tag frequencies ──────────────────────────────────────────────────────────
-tag_to_ids = {}
-for vid_id, tags in cluster_meta['tags'].dropna().items():
-    if isinstance(tags, list):
-        tag_list = [t.lower().strip() for t in tags]
-    elif isinstance(tags, str):
-        tag_list = [t.lower().strip() for t in tags.split(',')]
-    else:
-        continue
-    for tag in tag_list:
-        tag_to_ids.setdefault(tag, []).append(vid_id)
-
-tag_counts = Counter({t: len(ids) for t, ids in tag_to_ids.items()})
-
-print('\n── Top Tags ──')
-for tag, count in tag_counts.most_common(20):
-    print(f'  {count:>4}  {tag:<25} {sample_links(tag_to_ids[tag])}')
-
-
+    
 # ====== Region & cluster inspection helpers ======
 
 def find_clusters_in_region( x_bounds, y_bounds, day=None, window_days=15):
