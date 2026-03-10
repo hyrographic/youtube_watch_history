@@ -251,7 +251,7 @@ def compose(vid_id):
         parts.append(title)
     return ' | '.join(parts)
 
-composed = pd.Series([compose(i) for i in _combined_idx], index=_combined_idx).sample(round(len(_combined_idx)*0.3)) # ! TESTING SAMPLE
+composed = pd.Series([compose(i) for i in _combined_idx], index=_combined_idx)#.sample(round(len(_combined_idx)*0.3)) # ! TESTING SAMPLE
 
 composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'nomic_1.npy', composed.index)
 composed_cats = categories.loc[composed.index].copy()
@@ -407,8 +407,8 @@ for cat in cat_order:
 # 3. Plot
 fig = plt.figure(figsize=(14, 14), dpi=300)
 ax = fig.add_subplot(111, aspect='equal')
-ax.set_facecolor('#0f0f0f')
-fig.patch.set_facecolor('#0f0f0f')
+ax.set_facecolor('#0a0a0a')
+fig.patch.set_facecolor('#0a0a0a')
 
 # Faint unit circle boundary
 circle = plt.Circle((0, 0), 1.0, color='white', fill=False, lw=0.5, alpha=0.15)
@@ -863,6 +863,7 @@ def inspect_cluster(s, n_links=2):
 #%%
 
 # ====== Clustering Animation ======
+# %%
 import animation_rendering
 reload(animation_rendering)
 
@@ -873,22 +874,53 @@ renderer = animation_rendering.UMAPAnimationRenderer(
     glow_size=1.5,
     scale_by_duration=True,
     noise_duration_min_size=0.5,
-    noise_duration_max_size=80
+    noise_duration_max_size=80,
 )
 
-render_range = watch_data[(watch_data['date'].dt.to_period('M')>='2024-01') & (watch_data['date'].dt.to_period('M')<='2024-12')].copy()
+# ── Pre-compute shared inputs ──────────────────────────────────────────────────
+coords_df, cat_order, cat_angles, _ = renderer.compute_circular_layout(umap_embeddings, umap_cats)
 
-render_range = watch_data[(watch_data['date'].dt.to_period('D')>='2025-01-01') & (watch_data['date'].dt.to_period('D')<='2025-03-01')].copy()
+colors_series   = pd.Series(umap_colors, index=umap_embeddings.index)
+is_noise        = (sub_labels == -1)
+duration_series = pd.Series(
+    umap_embeddings.index.map(mdata_nlp['duration']),
+    index=umap_embeddings.index,
+)
 
-# Quick single-frame preview — run this to iterate on visuals without a full render
-renderer.sample_frame(render_range, clustered_embeddings, hdbscan_colours, day_idx=72, save_path='charts/sample_frame.svg')
+render_range = watch_data[
+    (watch_data['date'].dt.to_period('D') >= '2025-01-01') &
+    (watch_data['date'].dt.to_period('D') <= '2025-03-01')
+].copy()
+render_range = render_range[render_range['id'].isin(umap_embeddings.index)]
+
+# ── Quick single-frame preview ─────────────────────────────────────────────────
+renderer.sample_frame(
+    render_range, coords_df, colors_series, is_noise,
+    day_idx=72,
+    save_path='charts/sample_frame.svg',
+    marker_series=sub_labels,
+    shape_marker=shape_marker,
+    duration_series=duration_series,
+    cat_colours=cat_colours,
+    cat_angles=cat_angles,
+    cat_order=cat_order,
+)
 
 renderer.frame_to_date(72)
+# %%
 
 
-renderer.render(
-    df=render_range,
-    combined_embeddings=clustered_embeddings,
-    hdbscan_colours=hdbscan_colours,
-    output_dir='charts/frames_v9'
-)
+# ── Full render ────────────────────────────────────────────────────────────────
+# renderer.render(
+#     df=render_range,
+#     coords_df=coords_df,
+#     colors_series=colors_series,
+#     is_noise_series=is_noise,
+#     output_dir='charts/frames_v9',
+#     marker_series=sub_labels,
+#     shape_marker=shape_marker,
+#     duration_series=duration_series,
+#     cat_colours=cat_colours,
+#     cat_angles=cat_angles,
+#     cat_order=cat_order,
+# )
