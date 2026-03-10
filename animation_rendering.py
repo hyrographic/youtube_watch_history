@@ -484,6 +484,24 @@ class UMAPAnimationRenderer:
         if show:
             plt.show()
 
+    def frame_to_date(self, frame: int):
+        """
+        Return the calendar date that a given frame number corresponds to.
+
+        Parameters
+        ----------
+        frame : int
+            Absolute frame index (0-based), as used in the output filenames.
+
+        Returns
+        -------
+        datetime.date
+        """
+        if self._days is None:
+            raise RuntimeError('No data cached — call render() or sample_frame() first.')
+        day_idx = min(frame // self.frames_per_day, len(self._days) - 1)
+        return self._days[day_idx].to_timestamp().date()
+
     def reset(self):
         """
         Clear all cached data and close the figure.

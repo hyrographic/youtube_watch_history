@@ -11,6 +11,7 @@ from tqdm import tqdm
 import random
 from importlib import reload
 import numba
+import math
 
 # data vis
 import seaborn as sns
@@ -150,7 +151,7 @@ title_tokens.value_counts().head(25)
 
 titles_cleaned = title_tokens.groupby(level=0).agg(lambda x: ' '.join(x))
 
-# ====== generate embeddings ======
+# sentence transformer functions
 def create_transformer(model):
     return SentenceTransformer(model, trust_remote_code=True)
 
@@ -165,6 +166,67 @@ def encode_cached(m, transformer, values, file_name, index):
     np.save(fp, emb)
     return pd.DataFrame(emb, index=index)
 
+# ── category (dominant cleaned tag) ───────────────────────
+cat_m = 'all-MiniLM-L6-v2'
+category_model = create_transformer(cat_m)
+# For each video, aggregate its tag embeddings and find nearest category
+def infer_category_from_tags(tag_list, original_category, threshold=0.15, verbose=False):
+    if isinstance(original_category, list):
+        original_category = original_category[0]
+    # else:
+    #     return 'None'
+
+    if not tag_list:
+        return original_category
+    
+    # Mean pool pre-cached tag embeddings
+    tag_vecs = [tag_embeddings[t] for t in tag_list if t in tag_embeddings]
+    if not tag_vecs:
+        return original_category
+    tag_centroid = np.mean(tag_vecs, axis=0)
+    
+    # Cosine sim to each category
+    sims = {
+        cat: np.dot(tag_centroid, cat_emb) / (np.linalg.norm(tag_centroid) * np.linalg.norm(cat_emb))
+        for cat, cat_emb in category_embeddings.items()
+    }
+    
+    best_cat = max(sims, key=sims.get)
+    best_score = sims[best_cat]
+    
+    # Only override if confident enough
+    if verbose:
+        print('best_cat', best_cat, 'score', best_score)
+        print(best_score > threshold)
+    return best_cat if best_score > threshold else original_category
+
+unique_categories = categories.unique().tolist()
+_cat_emb_df = encode_cached(cat_m, category_model, unique_categories, 'categories.npy', unique_categories)
+category_embeddings = {cat: _cat_emb_df.loc[cat].values for cat in unique_categories}
+
+_unique_tags = tag_values.unique().tolist()
+_tag_emb_df = encode_cached(cat_m, category_model, _unique_tags, 'tag_embeddings.npy', _unique_tags)
+tag_embeddings = {tag: _tag_emb_df.loc[tag].values for tag in _unique_tags}
+
+corrected_categories = mdata_nlp.apply(
+    lambda row: infer_category_from_tags(
+        tags_cleaned.get(row.name, []),
+        row['categories']
+    ), axis=1
+)
+
+# print out summary of changes
+# corrected_cats_df = corrected_categories.to_frame()
+# corrected_cats_df.columns = ['new_cat']
+# corrected_cats_df['old_cat'] = corrected_cats_df.index.map(categories)
+
+# category_changed = corrected_cats_df['old_cat'] != corrected_cats_df['new_cat']
+
+# cat_changes = corrected_cats_df[category_changed].groupby(['old_cat', 'new_cat'], as_index=False).size()
+# cat_changes['cat_change'] = cat_changes[['old_cat', 'new_cat']].apply(lambda x: '->'.join(x), axis=1)
+# cat_changes.groupby(['cat_change'])['size'].sum().sort_values(ascending=False).head(50)
+
+# ====== generate embeddings ======
 # m = 'all-MiniLM-L6-v2' # fast model
 # m = 'all-mpnet-base-v2' #slow model
 # m = 'distilbert-base-nli-mean-tokens'
@@ -213,16 +275,29 @@ dim_reduction_model = umap.UMAP(
     # metric='correlation'
 )
 umap_embeddings = pd.DataFrame(dim_reduction_model.fit_transform(composed_embeddings), index=composed_embeddings.index)
-umap_cats = categories.loc[umap_embeddings.index].copy()
+umap_cats = categories.loc[umap_embeddings.index].copy() # youtube generated categories
+
+# overwrite categories with channel dominant tags
+umap_cats = pd.Series(umap_cats.index.map(corrected_categories), index=umap_cats.index).fillna(umap_cats)
 
 # ── Per-category HDBSCAN sub-clustering ──────────────────────────────────────
-_sub_clusterer = HDBSCAN(min_cluster_size=30, min_samples=5, metric='euclidean', copy=True)
+def get_hdbscan_params(n_points):
+    return dict(
+        min_cluster_size=max(5, n_points // 50),   # ~2% of category
+        min_samples=max(3, n_points // 200),        # ~0.5% of category
+        cluster_selection_epsilon=0.0,
+        metric='euclidean',
+        copy=True
+    )
+
 sub_labels = pd.Series(-1, index=umap_embeddings.index, name='sub_label', dtype=int)
 for cat, idx in umap_cats.groupby(umap_cats).groups.items():
     pts = umap_embeddings.loc[idx]
-    if len(pts) < _sub_clusterer.min_cluster_size:
+    params = get_hdbscan_params(len(pts))
+    sub_hdb = HDBSCAN(**params)
+    if len(pts) < sub_hdb.min_cluster_size:
         continue
-    local_labels = _sub_clusterer.fit_predict(pts)
+    local_labels = sub_hdb.fit_predict(pts)
     sub_labels.loc[idx] = local_labels
     # print('Category: ', cat)
     # print('Num watches: ', len(local_labels))
@@ -234,8 +309,10 @@ COLOR_BY = 'subcluster'   # 'subcluster' | 'channel' | 'category'
 SHAPE_MODE = True        # True → marker shape also encodes COLOR_BY variable
 
 import colorsys
+with open('resources/color_palette_50+.txt', 'r') as f:
+    local_pal = f.read().split('\n')
 
-palette = sns.color_palette('tab20', 16)
+palette = sns.color_palette(local_pal)
 cat_colours = {cat: palette[i] for i, cat in enumerate(umap_cats.unique())}
 
 if COLOR_BY == 'subcluster':
@@ -275,10 +352,12 @@ else:
     shape_values = umap_cats.values
 
 # Marker cycle for SHAPE_MODE
-_markers = ['o', 's', '^', 'D', 'v', 'p', 'h', 'P', '*', 'X']
+_markers = {'o': 1.0, 's': 0.9, '^': 1.2, 'D': 0.85, 'v': 1.2,
+                 'p': 0.9, 'h': 0.9, 'P': 0.85, '*': 3, 'X': 0.85}
 if SHAPE_MODE:
     unique_shape_vals = list(dict.fromkeys(shape_values))  # preserve order
-    shape_marker = {v: _markers[i % len(_markers)] for i, v in enumerate(unique_shape_vals)}
+    mkers_list = list(_markers.keys())
+    shape_marker = {v: mkers_list[i % len(mkers_list)] for i, v in enumerate(unique_shape_vals)}
 else:
     shape_marker = None  # single scatter pass
 
@@ -336,13 +415,11 @@ circle = plt.Circle((0, 0), 1.0, color='white', fill=False, lw=0.5, alpha=0.15)
 ax.add_patch(circle)
 
 c_arr = np.array(umap_colors, dtype=float)
-_marker_scale = {'o': 1.0, 's': 0.9, '^': 1.2, 'D': 0.85, 'v': 1.2,
-                 'p': 0.9, 'h': 0.9, 'P': 0.85, '*': 0.5, 'X': 0.85}
-BASE_S = 5
+BASE_S = 2.5
 if SHAPE_MODE and shape_marker is not None:
     for val, marker in shape_marker.items():
         mask = shape_values == val
-        ms = BASE_S * _marker_scale.get(marker, 1.0)
+        ms = BASE_S * _markers.get(marker, 1.0)
         ax.scatter(coords_circ[mask, 0], coords_circ[mask, 1],
                    c=c_arr[mask], s=ms, alpha=0.5, linewidths=0, marker=marker)
 else:
@@ -365,8 +442,7 @@ handles = [Patch(color=cat_colours[cat], label=cat) for cat in cat_colours]
 ax.legend(handles=handles, loc='lower center', bbox_to_anchor=(0.5, -0.05),
           ncol=4, frameon=False, labelcolor='white', fontsize=7)
 
-
-fig.savefig(f'charts/20k Sample Circle {datetime.today().strftime('%d-%mmm %H')}.svg', transparent=True)
+fig.savefig(f'charts/20k Sample Circle {datetime.today().strftime('%d-%mmm %H')}.svg')
 
 #%%
 # ====== HDBSCAN clustering ======
@@ -422,13 +498,13 @@ def sample_links(ids, n=2):
 # s = random.sample(list(set(valid_labels)), 1)[0]
 # s = 49
 
-selected_cat = 'Music'
+selected_cat = 'News & Politics'
 category_index = composed_cats[composed_cats==selected_cat].index
 
 category_sample = sub_labels.loc[category_index]
 print(f'{selected_cat} cluster: ', category_sample.value_counts())
 
-music_cluster_i = category_sample[category_sample == 4].index
+music_cluster_i = category_sample[category_sample == 1].index
 
 s_df = umap_embeddings[umap_embeddings.index.isin(music_cluster_i)].copy()
 s_ids = s_df.index.tolist()
