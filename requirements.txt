@@ -10,3 +10,5 @@ yt-dlp
 tqdm
 sentence-transformers
 umap-learn
+plotly
+nbformat
