@@ -155,7 +155,21 @@ print('unique tags: ', tag_values.nunique())
 tag_values.value_counts().iloc[50:].head(25)
 # tag_values.value_counts(normalize=True).head(25)
 
-tags_cleaned = tag_values.groupby(level=0).agg(list)
+# custom additions
+custom_additions = []
+def add_custom_tags(channel: str, tags_to_add: list):
+    _ids = mdata_nlp[mdata_nlp['channel'] == channel].index.tolist()
+    _to_add = pd.Series(
+        [t for vid in _ids for t in tags_to_add],
+        index=[vid for vid in _ids for t in tags_to_add]
+        )
+    custom_additions.append(_to_add)
+    return _to_add
+
+#* Zack D. Films
+add_custom_tags('Zack D. Films', ['entertainment'])
+
+tags_cleaned = pd.concat([tag_values, *custom_additions]).groupby(level=0).agg(list)
 
 # MARK: Clean Titles
 # ====== clean title data ======
@@ -216,11 +230,11 @@ def infer_category_from_tags(cats_series, threshold, verbose=False):
                 {'id':i,
                 'og_cat':original_category,
                 'og_cat_score':np.nan,
-                'best_cat':np.nan,
-                'best_cat_score':np.nan,
+                'alt_cat':np.nan,
+                'alt_cat_score':np.nan,
                 'changed': np.nan,
                 'score_diff':np.nan,
-                'corrected_category':original_category
+                'final_cat':original_category
                 }
             )
             continue
@@ -232,15 +246,15 @@ def infer_category_from_tags(cats_series, threshold, verbose=False):
                 {'id':i,
                 'og_cat':original_category,
                 'og_cat_score':np.nan,
-                'best_cat':np.nan,
-                'best_cat_score':np.nan,
+                'alt_cat':np.nan,
+                'alt_cat_score':np.nan,
                 'changed': np.nan,
                 'score_diff':np.nan,
-                'corrected_category':original_category
+                'final_cat':original_category
                 }
             )
             continue
-        tag_centroid = np.median(tag_vecs, axis=0)
+        tag_centroid = np.mean(tag_vecs, axis=0)
         
         # Cosine sim to each category: max over per-word similarities
         norm_tag = tag_centroid / np.linalg.norm(tag_centroid)
@@ -265,11 +279,11 @@ def infer_category_from_tags(cats_series, threshold, verbose=False):
             {'id':i,
              'og_cat':original_category,
              'og_cat_score':og_cat_score,
-             'best_cat':best_cat,
-             'best_cat_score':best_score,
+             'alt_cat':best_cat,
+             'alt_cat_score':best_score,
              'changed': all([change_cat, best_cat != original_category]),
              'score_diff':f'{best_score - og_cat_score:+0.2f}',
-             'corrected_category': best_cat if change_cat else original_category
+             'final_cat': best_cat if change_cat else original_category
              }
         )
     return pd.json_normalize(updated_categories)
@@ -305,20 +319,20 @@ category_word_embeddings = {
     for key, words in _cat_words.items()
 }
 
-_unique_tags = tag_values.unique().tolist()
+_unique_tags = tags_cleaned.explode().unique().tolist()
 _tag_emb_df = encode_cached(cat_m, category_model, _unique_tags, 'tag_embeddings_5.npy', _unique_tags)
 tag_embeddings = {tag: _tag_emb_df.loc[tag].values for tag in _unique_tags}
 
-adjusted_categories_df = infer_category_from_tags(categories_clean, threshold=0.15).set_index('id')
-adjusted_categories = adjusted_categories_df['corrected_category']
+adjusted_categories_df = infer_category_from_tags(categories_clean, threshold=0.05).set_index('id')
+adjusted_categories = adjusted_categories_df['final_cat']
 
-# print out summary of changes
+# MARK: Category Analysis
 category_changed = adjusted_categories_df[adjusted_categories_df['changed'].fillna(False)]
-changed_gby = category_changed.groupby(['og_cat', 'best_cat'], as_index=False).size()
-changed_gby['cat_change'] = changed_gby[['og_cat', 'best_cat']].apply(lambda x: '->'.join(x), axis=1)
+changed_gby = category_changed.groupby(['og_cat', 'alt_cat'], as_index=False).size()
+changed_gby['cat_change'] = changed_gby[['og_cat', 'alt_cat']].apply(lambda x: '->'.join(x), axis=1)
 
 print(f'Total Number of categories changed: {len(category_changed):,}')
-changed_summary = category_changed['best_cat'].value_counts().sort_values(ascending=False).to_frame().rename(columns={'count':'count_added'})
+changed_summary = category_changed['alt_cat'].value_counts().sort_values(ascending=False).to_frame().rename(columns={'count':'count_added'})
 
 lost_vals = category_changed['og_cat'].value_counts()
 changed_summary['count_lost'] = changed_summary.index.map(lost_vals)
@@ -334,7 +348,7 @@ print(changed_summary[['num_lost', 'proportion_lost', 'num_added', 'resulting_ca
 
 # find random channels and tags
 c1 = category_changed['og_cat'] == 'Entertainment'
-c2 = category_changed['best_cat'] == 'Music'
+c2 = category_changed['alt_cat'] == 'Music'
 selected_ids = category_changed[c1 & c2].index.tolist()
 selected_mdata = mdata_nlp[mdata_nlp.index.isin(selected_ids)]
 
@@ -343,7 +357,7 @@ selected_mdata['channel'].value_counts().head(25)
 selected_tags = list(itertools.chain(*tags_cleaned.loc[selected_ids].values))
 pd.Series(selected_tags).value_counts().head(30)
 
-selected_channel = 'Pop Culture Brain'
+selected_channel = 'Zack D. Films'
 channel_vid_ids = mdata_nlp[mdata_nlp['channel'] == selected_channel].index
 
 channel_with_changed_cat = list(set(selected_ids) & set(channel_vid_ids))
@@ -351,9 +365,9 @@ channel_selected_tags = list(itertools.chain(*tags_cleaned.loc[channel_with_chan
 pd.Series(channel_selected_tags).value_counts().head(30)
 
 # %%
-# print tags per OG tag 
-cci = adjusted_categories_df.loc[channel_vid_ids].reset_index()
-ids_per_cat = cci.groupby(['og_cat'])['id'].agg(list)
+# print tags per category
+cci = adjusted_categories_df.loc[channel_vid_ids.tolist()].reset_index()
+ids_per_cat = cci.groupby(['final_cat'])['id'].agg(list)
 ids_per_cat.sort_values(key=lambda x: x.apply(len), ascending=False, inplace=True)
 for _cat, ids in ids_per_cat.items():
     print(_cat, ':', len(ids), 'videos')
@@ -740,13 +754,13 @@ def sample_links(ids, n=2):
     return '  '.join(f'https://youtube.com/watch?v={i}' for i in sampled)
 
 # ── Choose random cluster ────────────────────────────────────────────────────
-selected_cat = 'Autos & Vehicles'
+selected_cat = 'Travel & Events'
 category_index = umap_cats[umap_cats==selected_cat].index
 
 category_sample = sub_labels.loc[category_index]
 print(f'{selected_cat} cluster: ', category_sample.value_counts())
 
-selected_sub_cluster = 6
+selected_sub_cluster = 5
 custom_subcluster = category_sample[category_sample == selected_sub_cluster].index
 
 s_df = umap_embeddings[umap_embeddings.index.isin(custom_subcluster)].copy()
