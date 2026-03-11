@@ -166,8 +166,10 @@ def add_custom_tags(channel: str, tags_to_add: list):
     custom_additions.append(_to_add)
     return _to_add
 
-#* Zack D. Films
 add_custom_tags('Zack D. Films', ['entertainment'])
+add_custom_tags('Very Important People', ['comedy'])
+add_custom_tags('JCS - Criminal Psychology', ['documentary'])
+add_custom_tags('Channel 5 with Andrew Callaghan', ['news'])
 
 tags_cleaned = pd.concat([tag_values, *custom_additions]).groupby(level=0).agg(list)
 
@@ -176,7 +178,7 @@ tags_cleaned = pd.concat([tag_values, *custom_additions]).groupby(level=0).agg(l
 def tokenise(text):
     if not isinstance(text, str):
         return []
-    return [w for w in re.findall(r"[a-z']+", text.lower()) if w not in stopwords_list and len(w) > 1]
+    return [w for w in re.findall(r"[a-z0-9']+", text.lower()) if w not in stopwords_list and len(w) > 1]
 
 title_values = title_data['title']
 title_tokens = title_values.apply(tokenise).explode()
@@ -189,6 +191,8 @@ title_tokens = (
 
 # remove stop words from tag values
 title_tokens = title_tokens[~title_tokens.isin(stopwords_list)]
+# remove tokens made of just numbers
+title_tokens = title_tokens[~title_tokens.str.match('^[0-9]+$')]
 # apply string replacements
 title_tokens = title_tokens.map(str_replacements, na_action=None).fillna(title_tokens)
 # remove shorts
@@ -200,18 +204,52 @@ print('unique words: ', title_tokens.nunique())
 title_tokens.value_counts().head(25)
 # title_tokens.value_counts(normalize=True).head(25)
 
-titles_cleaned = title_tokens.groupby(level=0).agg(lambda x: ' '.join(x))
+titles_cleaned = title_tokens.groupby(level=0).agg(lambda x: ' '.join(x)).reindex(mdata_nlp.index).fillna(mdata_nlp['channel'])
 
 # MARK: Clean Categories
 #%%
 # categories_clean = categories.str.replace('&', '', regex=1)
 # categories_clean = categories_clean.str.replace(r'\s+', ' ', regex=1)
 categories_clean = categories.str.title().str.strip()
+# removes category entirely - ignored during reassignment as replaced with None
 remove_categories = [
     'Nonprofits & Activism'
 ]
 add_to_none = categories_clean.isin(remove_categories)
 categories_clean[add_to_none] = 'None'
+
+
+# MARK: Embeddings
+# %%
+m = 'all-MiniLM-L6-v2' # fast model
+# m = 'all-mpnet-base-v2' #slow model
+# m = 'distilbert-base-nli-mean-tokens'
+import os
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
+# m = 'nomic-ai/nomic-embed-text-v1.5'
+sent_transformer = create_transformer(m)
+
+# ====== Embed on single combined string ======
+_combined_idx = titles_cleaned.index.union(tags_cleaned.index)
+_titles_aligned = titles_cleaned.reindex(_combined_idx)
+_tags_aligned = tags_data['tags'].reindex(_combined_idx)
+
+def compose(vid_id, include_tags=True):
+    parts = []
+    tag_list = _tags_aligned.loc[vid_id]
+    if include_tags:
+        if isinstance(tag_list, list) and tag_list:
+            parts.append(' '.join(tag_list[:10]))
+    title = _titles_aligned.loc[vid_id]
+    if isinstance(title, str) and title:
+        parts.append(title)
+    return ' | '.join(parts)
+
+composed = pd.Series([compose(i, include_tags=True) for i in _combined_idx], index=_combined_idx)#.sample(round(len(_combined_idx)*0.3), random_state=5) # ! TESTING SAMPLE
+
+composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'composed_full_2.npy', composed.index)
+composed_cats = categories.loc[composed.index].copy()
 
 # MARK: Fix Categories
 # %%
@@ -224,46 +262,51 @@ def infer_category_from_tags(cats_series, threshold, verbose=False):
         if isinstance(original_category, list):
             original_category = original_category[0]
 
-        tag_list = tags_cleaned.get(i, [])
-        if not tag_list:
-            updated_categories.append(
-                {'id':i,
-                'og_cat':original_category,
-                'og_cat_score':np.nan,
-                'alt_cat':np.nan,
-                'alt_cat_score':np.nan,
-                'changed': np.nan,
-                'score_diff':np.nan,
-                'final_cat':original_category
-                }
-            )
-            continue
+        # tag_list = tags_cleaned.get(i, [])
+        # if not tag_list:
+        #     updated_categories.append(
+        #         {'id':i,
+        #         'og_cat':original_category,
+        #         'og_cat_score':np.nan,
+        #         'alt_cat':np.nan,
+        #         'alt_cat_score':np.nan,
+        #         'changed': np.nan,
+        #         'score_diff':np.nan,
+        #         'final_cat':original_category
+        #         }
+        #     )
+        #     continue
         
         # Mean pool pre-cached tag embeddings
-        tag_vecs = [tag_embeddings[t] for t in tag_list if t in tag_embeddings]
-        if not tag_vecs:
-            updated_categories.append(
-                {'id':i,
-                'og_cat':original_category,
-                'og_cat_score':np.nan,
-                'alt_cat':np.nan,
-                'alt_cat_score':np.nan,
-                'changed': np.nan,
-                'score_diff':np.nan,
-                'final_cat':original_category
-                }
-            )
-            continue
-        tag_centroid = np.mean(tag_vecs, axis=0)
+        # tag_vecs = [tag_embeddings[t] for t in tag_list if t in tag_embeddings]
+        # if not tag_vecs:
+        #     updated_categories.append(
+        #         {'id':i,
+        #         'og_cat':original_category,
+        #         'og_cat_score':np.nan,
+        #         'alt_cat':np.nan,
+        #         'alt_cat_score':np.nan,
+        #         'changed': np.nan,
+        #         'score_diff':np.nan,
+        #         'final_cat':original_category
+        #         }
+        #     )
+        #     continue
+        # tag_centroid = np.mean(tag_vecs, axis=0)
+        if i in composed_embeddings.index:
+            composed_emb = composed_embeddings.loc[i]
+        else:
+            print(i)
+            print('Not found!')
         
         # Cosine sim to each category: max over per-word similarities
-        norm_tag = tag_centroid / np.linalg.norm(tag_centroid)
+        norm_tag = composed_emb / np.linalg.norm(composed_emb)
         sims = {}
         for cat, word_vecs in category_word_embeddings.items():
             norm_words = word_vecs / np.linalg.norm(word_vecs, axis=1, keepdims=True)
             sims[cat] = float((norm_words @ norm_tag).max())
         
-        og_cat_score = sims.get(original_category, np.nan)
+        og_cat_score = sims.get(original_category, 0)
 
         best_cat = max(sims, key=sims.get)
         best_score = sims[best_cat]
@@ -291,19 +334,20 @@ def infer_category_from_tags(cats_series, threshold, verbose=False):
 category_detail = {
     'People & Blogs': 'people blogs',
     'Entertainment': 'entertainment',
-    'Gaming': 'gaming overwatch gta',
+    'Gaming': 'gaming overwatch gta minecraft',
     'Comedy': 'comedy skit sketch',
     'Science & Technology': 'science technology biology',
-    'Education': 'education history religion aviation law',
-    'Music': 'music',
-    'Howto & Style': 'howto tutorial learning cooking',
+    'Education': 'education history religion aviation law documentary',
+    'Music': 'music art',
+    'Howto & Style': 'howto tutorial cooking diy',
     'Sports': 'sports football',
     'Film & Animation': 'film animation movie tv',
     'Autos & Vehicles': 'autos vehicles cars',
     'Travel & Events': 'travel',
     'None': 'none',
-    'News & Politics': 'news politics events',
+    'News & Politics': 'news politics events media',
     'Pets & Animals': 'pets animals',
+    # 'Coding, Data & Analysis':'data analysis tableau coding'
     # 'Cooking & Food':'cooking food'
 }
 
@@ -323,33 +367,48 @@ _unique_tags = tags_cleaned.explode().unique().tolist()
 _tag_emb_df = encode_cached(cat_m, category_model, _unique_tags, 'tag_embeddings_5.npy', _unique_tags)
 tag_embeddings = {tag: _tag_emb_df.loc[tag].values for tag in _unique_tags}
 
+_unique_title_tokens = tags_cleaned.explode().unique().tolist()
+_tag_emb_df = encode_cached(cat_m, category_model, _unique_tags, 'tag_embeddings_5.npy', _unique_tags)
+tag_embeddings = {tag: _tag_emb_df.loc[tag].values for tag in _unique_tags}
+
 adjusted_categories_df = infer_category_from_tags(categories_clean, threshold=0.05).set_index('id')
 adjusted_categories = adjusted_categories_df['final_cat']
 
 # MARK: Category Analysis
-category_changed = adjusted_categories_df[adjusted_categories_df['changed'].fillna(False)]
-changed_gby = category_changed.groupby(['og_cat', 'alt_cat'], as_index=False).size()
-changed_gby['cat_change'] = changed_gby[['og_cat', 'alt_cat']].apply(lambda x: '->'.join(x), axis=1)
+def category_change_summary(vid_id_set=None):
+    if isinstance(vid_id_set, list):
+        df = adjusted_categories_df[adjusted_categories_df.isin(vid_id_set)].copy()
+    elif isinstance(vid_id_set, pd.Index) | isinstance(vid_id_set, pd.Series):
+        df = adjusted_categories_df[adjusted_categories_df.index.isin(vid_id_set.tolist())].copy()
+    else:
+        df = adjusted_categories_df.copy()
+    
+    category_changed = df[df['changed'].fillna(False)]
+    print(f'Total Number of categories changed: {len(category_changed):,}')
 
-print(f'Total Number of categories changed: {len(category_changed):,}')
-changed_summary = category_changed['alt_cat'].value_counts().sort_values(ascending=False).to_frame().rename(columns={'count':'count_added'})
+    summary = df['final_cat'].value_counts().sort_values(ascending=False).to_frame().rename(columns={'count':'resulting_cat_size'})
 
-lost_vals = category_changed['og_cat'].value_counts()
-changed_summary['count_lost'] = changed_summary.index.map(lost_vals)
+    summary['starting_cat_size'] = df['og_cat'].value_counts()
+    summary['count_lost'] = category_changed['og_cat'].value_counts()
+    summary['count_gained'] = category_changed['final_cat'].value_counts()
 
-changed_summary['proportion_lost'] = (changed_summary['count_lost'] / categories_clean.value_counts())
-changed_summary['proportion_lost'] = changed_summary['proportion_lost'].apply(lambda x: f'-{x:0.0%}')
-changed_summary['num_lost'] = changed_summary['count_lost'].apply(lambda x: f'-{x:0}')
-changed_summary['num_added'] = changed_summary['count_added'].apply(lambda x: f'{x:+0}')
+    fill_regex = r'((?:\+|\-)nan)'
+    summary['- lost'] = summary['count_lost'].apply(lambda x: f'-{x:0}').str.replace(fill_regex, '--', regex=1)
+    summary['+ gained'] = summary['count_gained'].apply(lambda x: f'+{x:0}').str.replace(fill_regex, '--', regex=1)
+    
+    summary['change'] = (summary['resulting_cat_size'] - summary['starting_cat_size']).divide(summary['starting_cat_size'])
+    summary['percent_change'] = summary['change'].apply(lambda x: f'{x:+0.2%}')
 
-changed_summary['resulting_cat_size'] = changed_summary.index.map(adjusted_categories.value_counts())
-print(f'Proportion of each category changed')
-print(changed_summary[['num_lost', 'proportion_lost', 'num_added', 'resulting_cat_size']].sort_values('resulting_cat_size', ascending=False))
+    print(f'Proportion of each category changed')
+    print(summary[['- lost', '+ gained', 'resulting_cat_size', 'percent_change']].sort_values('resulting_cat_size', ascending=False))
+    return summary
+
+category_change_summary();
 
 # find random channels and tags
-c1 = category_changed['og_cat'] == 'Entertainment'
-c2 = category_changed['alt_cat'] == 'Music'
-selected_ids = category_changed[c1 & c2].index.tolist()
+c1 = adjusted_categories_df['og_cat'] == 'Film & Animation'
+c2 = adjusted_categories_df['alt_cat'] == 'Education'
+selected_ids = adjusted_categories_df[c1 & c2].index.tolist()
 selected_mdata = mdata_nlp[mdata_nlp.index.isin(selected_ids)]
 
 selected_mdata['channel'].value_counts().head(25)
@@ -357,11 +416,12 @@ selected_mdata['channel'].value_counts().head(25)
 selected_tags = list(itertools.chain(*tags_cleaned.loc[selected_ids].values))
 pd.Series(selected_tags).value_counts().head(30)
 
-selected_channel = 'Zack D. Films'
+selected_channel = 'EDM Content'
 channel_vid_ids = mdata_nlp[mdata_nlp['channel'] == selected_channel].index
+category_change_summary(channel_vid_ids);
 
-channel_with_changed_cat = list(set(selected_ids) & set(channel_vid_ids))
-channel_selected_tags = list(itertools.chain(*tags_cleaned.loc[channel_with_changed_cat].values))
+channel_tags = tags_cleaned.loc[[_ for _ in channel_vid_ids if _ in tags_cleaned]]
+channel_selected_tags = list(itertools.chain(*channel_tags.values))
 pd.Series(channel_selected_tags).value_counts().head(30)
 
 # %%
@@ -375,22 +435,27 @@ for _cat, ids in ids_per_cat.items():
     print(pd.Series(tags_flat).value_counts().head(10))
     print('\n')
 
+
+# MARK: Category Sankey
 # %%
 # select custom df for sankey
-changed_gby = adjusted_categories_df.loc[selected_ids].groupby(['og_cat', 'best_cat'], as_index=False).size()
-changed_gby['cat_change'] = changed_gby[['og_cat', 'best_cat']].apply(lambda x: '->'.join(x), axis=1)
+changed_gby = (
+    adjusted_categories_df
+    # .loc[selected_ids]
+    .groupby(['og_cat', 'final_cat'], as_index=False)
+    .size()
+)
+changed_gby['cat_change'] = changed_gby[['og_cat', 'final_cat']].apply(lambda x: '->'.join(x), axis=1)
 
-# %%
-# MARK: Category Sankey
-og_filter_for = []
-best_filter_for = ['Music']
+og_filter_for = ['Film & Animation']
+best_filter_for = []
 
 mask = pd.Series(True, index=changed_gby.index)
 
 if og_filter_for:
     mask &= changed_gby['og_cat'].isin(og_filter_for)
 if best_filter_for:
-    mask &= changed_gby['best_cat'].isin(best_filter_for)
+    mask &= changed_gby['final_cat'].isin(best_filter_for)
 
 _OTHER_THRESHOLD = 5
 
@@ -404,13 +469,13 @@ _sk_df = _large.copy()
 if not _small.empty:
     _sk_df = pd.concat([
         _sk_df,
-        pd.DataFrame([{'og_cat': 'Other', 'best_cat': 'Other', 'size': _small['size'].sum()}]),
+        pd.DataFrame([{'og_cat': 'Other', 'final_cat': 'Other', 'size': _small['size'].sum()}]),
     ], ignore_index=True)
 _sk_df = _sk_df.sort_values('size', ascending=False)
 
 # Build node list: always suffix target names to prevent circular merging
 _src_names  = list(_sk_df['og_cat'].unique())
-_tgt_cats   = list(_sk_df['best_cat'].unique())
+_tgt_cats   = list(_sk_df['final_cat'].unique())
 _tgt_names  = [n + '\u200b' for n in _tgt_cats]   # zero-width space = unique key, invisible in labels
 _tgt_key    = {cat: cat + '\u200b' for cat in _tgt_cats}
 _nodes      = _src_names + _tgt_names
@@ -427,7 +492,7 @@ def _rgba(name, alpha=0.8):
     return f'rgba({r},{g},{b},{alpha})'
 
 def _tgt_color(cat):
-    rows = _sk_df[_sk_df['best_cat'] == cat]
+    rows = _sk_df[_sk_df['final_cat'] == cat]
     if rows.empty:
         return 'rgba(140,140,140,1.0)'
     top_src = rows.sort_values('size').iloc[-1]['og_cat']
@@ -439,10 +504,10 @@ _node_colors = [
 ]
 
 _link_sources = [_node_idx[r['og_cat']]           for _, r in _sk_df.iterrows()]
-_link_targets = [_node_idx[_tgt_key[r['best_cat']]] for _, r in _sk_df.iterrows()]
+_link_targets = [_node_idx[_tgt_key[r['final_cat']]] for _, r in _sk_df.iterrows()]
 _link_values  = _sk_df['size'].tolist()
 _link_colors  = [_rgba(r['og_cat'], 0.4) for _, r in _sk_df.iterrows()]
-_link_labels  = [f"{r['og_cat']} → {r['best_cat']}: {r['size']:,}"
+_link_labels  = [f"{r['og_cat']} → {r['final_cat']}: {r['size']:,}"
                  for _, r in _sk_df.iterrows()]
 
 _fig_sk = go.Figure(go.Sankey(
@@ -470,37 +535,6 @@ _fig_sk.update_layout(
     height=max(500, len(_src_names) * 30),
 )
 _fig_sk.show()
-
-# MARK: Embeddings
-# %%
-# m = 'all-MiniLM-L6-v2' # fast model
-# m = 'all-mpnet-base-v2' #slow model
-# m = 'distilbert-base-nli-mean-tokens'
-import os
-os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-
-m = 'nomic-ai/nomic-embed-text-v1.5'
-sent_transformer = create_transformer(m)
-
-# ====== Embed on single combined string ======
-_combined_idx = titles_cleaned.index.union(tags_cleaned.index)
-_titles_aligned = titles_cleaned.reindex(_combined_idx)
-_tags_aligned   = tags_data['tags'].reindex(_combined_idx)
-
-def compose(vid_id):
-    parts = []
-    tag_list = _tags_aligned.loc[vid_id]
-    if isinstance(tag_list, list) and tag_list:
-        parts.append(' '.join(tag_list[:10]))
-    title = _titles_aligned.loc[vid_id]
-    if isinstance(title, str) and title:
-        parts.append(title)
-    return ' | '.join(parts)
-
-composed = pd.Series([compose(i) for i in _combined_idx], index=_combined_idx)#.sample(round(len(_combined_idx)*0.3), random_state=5) # ! TESTING SAMPLE
-
-composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'composed_full_1.npy', composed.index)
-composed_cats = categories.loc[composed.index].copy()
 
 # MARK: PLOT FUNC
 # ============== Plot ==============
@@ -690,10 +724,11 @@ def plot_circular_chart(
 # MARK: UMAP / Cluster
 #%%
 # Get single month sample
-single_month = watch_data[watch_data['date'].dt.to_period('M') == '2024-04']
-single_month_ids = single_month['id'].unique().tolist()
-mask = composed_embeddings.index.isin(single_month_ids)
-masked_cats = composed_cats.loc[mask]
+# single_month = watch_data[watch_data['date'].dt.to_period('M') == '2024-04']
+# single_month_ids = single_month['id'].unique().tolist()
+# mask = composed_embeddings.index.isin(single_month_ids)
+# masked_cats = composed_cats.loc[mask] # youtube generated categories
+# masked_cats = composed_cats.loc[mask] # reassigned categories
 
 n_components = 2
 n_neighbors = 16  # low = local structure / sub-clusters; high = global topology
@@ -706,10 +741,9 @@ dim_reduction_model = umap.UMAP(
     # metric='correlation'
 )
 umap_embeddings = pd.DataFrame(dim_reduction_model.fit_transform(composed_embeddings), index=composed_embeddings.index)
-umap_cats = categories.loc[umap_embeddings.index].copy() # youtube generated categories
 
-# overwrite categories with channel dominant tags
-umap_cats = pd.Series(umap_cats.index.map(adjusted_categories), index=umap_cats.index).fillna(umap_cats)
+# umap_cats = categories.loc[umap_embeddings.index].copy() # youtube generated categories
+umap_cats = adjusted_categories.loc[umap_embeddings.index].copy() # reassigned categories
 
 # Per-category HDBSCAN sub-clustering
 def get_hdbscan_params(n_points):
@@ -717,7 +751,7 @@ def get_hdbscan_params(n_points):
         # ~2% of category
         min_cluster_size=max(5, int(n_points * 0.02)),
         # ~0.5% of category
-        min_samples=max(3, int(n_points * 0.005)),
+        min_samples=max(3, int(n_points * 0.0025)),
         cluster_selection_epsilon=0.0,
         metric='euclidean',
         copy=True
@@ -753,14 +787,33 @@ def sample_links(ids, n=2):
     sampled = random.sample(ids, min(n, len(ids)))
     return '  '.join(f'https://youtube.com/watch?v={i}' for i in sampled)
 
-# ── Choose random cluster ────────────────────────────────────────────────────
-selected_cat = 'Travel & Events'
+# Select a category
+selected_cat = 'People & Blogs'
 category_index = umap_cats[umap_cats==selected_cat].index
 
-category_sample = sub_labels.loc[category_index]
-print(f'{selected_cat} cluster: ', category_sample.value_counts())
+category_sample = sub_labels.loc[category_index].to_frame()
+category_sample['channel'] = category_sample.index.map(mdata_nlp['channel'])
+print(f'{selected_cat} cluster: ')
+print_out = (
+    category_sample
+    .reset_index()
+    .groupby(['sub_label'], as_index=False)
+    .agg({
+            'index':lambda x: len(set(x)),
+            'channel':lambda x: Counter(x.values).most_common(5)
+        })
+)
+print(f"{'Sub-Cluster':<25}{'Videos':<25}{'Top Channels':<25}")
+for i, row in print_out.iterrows():
+    _print = (
+        f"{str(row['sub_label']).replace('-1', 'NOISE'):<25}"
+        f"{row['index']:<25}"
+        + '| '.join([f"{cnt}-{ch}" for ch, cnt in dict(row['channel']).items()])
+    )
+    print(_print)
 
-selected_sub_cluster = 5
+# Select a sub-cluster
+selected_sub_cluster = 0
 custom_subcluster = category_sample[category_sample == selected_sub_cluster].index
 
 s_df = umap_embeddings[umap_embeddings.index.isin(custom_subcluster)].copy()
