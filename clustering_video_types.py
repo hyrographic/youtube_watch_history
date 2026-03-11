@@ -141,10 +141,11 @@ tag_values = tag_values.map(str_replacements, na_action=None).fillna(tag_values)
 tag_values = tag_values.str.replace(' ?shorts ?', '', regex=1)
 tag_values = tag_values[~tag_values.isin(stopwords_list)] # redo stop words as new noise might be created after removing "shorts"
 # remove tags which reference the channel name
-channels = mdata_nlp['channel'].str.lower().str.strip().str.replace(' ', '')
+_channel_regex = r'((\’|\')s|[^a-z0-9])'
+channels = mdata_nlp['channel'].str.lower().str.strip().str.replace(_channel_regex, '', regex=1)
 
 # remove tag == channel name
-tag_values = tag_values[tag_values != channels.reindex(tag_values.index)]
+tag_values = tag_values[tag_values.str.replace(_channel_regex, '', regex=1) != channels.reindex(tag_values.index)]
 
 # remove tags within channel name
 tag_values = tag_values[[tag.replace(' ', '') not in channel for tag, channel in zip(tag_values, channels.reindex(tag_values.index))]]
@@ -170,6 +171,7 @@ add_custom_tags('Zack D. Films', ['entertainment'])
 add_custom_tags('Very Important People', ['comedy'])
 add_custom_tags('JCS - Criminal Psychology', ['documentary'])
 add_custom_tags('Channel 5 with Andrew Callaghan', ['news'])
+add_custom_tags('Adam Savage’s Tested', ['diy'])
 
 tags_cleaned = pd.concat([tag_values, *custom_additions]).groupby(level=0).agg(list)
 
@@ -207,7 +209,6 @@ title_tokens.value_counts().head(25)
 titles_cleaned = title_tokens.groupby(level=0).agg(lambda x: ' '.join(x)).reindex(mdata_nlp.index).fillna(mdata_nlp['channel'])
 
 # MARK: Clean Categories
-#%%
 # categories_clean = categories.str.replace('&', '', regex=1)
 # categories_clean = categories_clean.str.replace(r'\s+', ' ', regex=1)
 categories_clean = categories.str.title().str.strip()
@@ -218,22 +219,21 @@ remove_categories = [
 add_to_none = categories_clean.isin(remove_categories)
 categories_clean[add_to_none] = 'None'
 
-
 # MARK: Embeddings
 # %%
-m = 'all-MiniLM-L6-v2' # fast model
+# m = 'all-MiniLM-L6-v2' # fast model
 # m = 'all-mpnet-base-v2' #slow model
 # m = 'distilbert-base-nli-mean-tokens'
 import os
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
-# m = 'nomic-ai/nomic-embed-text-v1.5'
+m = 'nomic-ai/nomic-embed-text-v1.5'
 sent_transformer = create_transformer(m)
 
 # ====== Embed on single combined string ======
 _combined_idx = titles_cleaned.index.union(tags_cleaned.index)
 _titles_aligned = titles_cleaned.reindex(_combined_idx)
-_tags_aligned = tags_data['tags'].reindex(_combined_idx)
+_tags_aligned = tags_cleaned.reindex(_combined_idx)
 
 def compose(vid_id, include_tags=True):
     parts = []
@@ -248,12 +248,13 @@ def compose(vid_id, include_tags=True):
 
 composed = pd.Series([compose(i, include_tags=True) for i in _combined_idx], index=_combined_idx)#.sample(round(len(_combined_idx)*0.3), random_state=5) # ! TESTING SAMPLE
 
-composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'composed_full_2.npy', composed.index)
+composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'composed_full.npy', composed.index)
 composed_cats = categories.loc[composed.index].copy()
 
 # MARK: Fix Categories
 # %%
 cat_m = 'all-MiniLM-L6-v2'
+cat_m = 'nomic-ai/nomic-embed-text-v1.5'
 category_model = create_transformer(cat_m)
 # For each video, aggregate its tag embeddings and find nearest category
 def infer_category_from_tags(cats_series, threshold, verbose=False):
@@ -332,26 +333,26 @@ def infer_category_from_tags(cats_series, threshold, verbose=False):
     return pd.json_normalize(updated_categories)
 
 category_detail = {
-    'People & Blogs': 'people blogs',
+    'People & Blogs': 'people blogs culture job career workplace',
     'Entertainment': 'entertainment',
     'Gaming': 'gaming overwatch gta minecraft',
     'Comedy': 'comedy skit sketch',
     'Science & Technology': 'science technology biology',
-    'Education': 'education history religion aviation law documentary',
-    'Music': 'music art',
-    'Howto & Style': 'howto tutorial cooking diy',
+    'Education': 'education history religion aviation law documentary howto tutorial',
+    'Music': 'music art edm',
     'Sports': 'sports football',
     'Film & Animation': 'film animation movie tv',
     'Autos & Vehicles': 'autos vehicles cars',
     'Travel & Events': 'travel',
-    'None': 'none',
     'News & Politics': 'news politics events media',
     'Pets & Animals': 'pets animals',
+    'Makers & Hobby':'diy printing 3dprinting maker tools'
+    # 'Howto & Style': 'howto tutorial cooking diy',
     # 'Coding, Data & Analysis':'data analysis tableau coding'
     # 'Cooking & Food':'cooking food'
 }
 
-# Word-level category embeddings: tokenise descriptor values, key by display name # TODO rephrase this
+# category embeddings from detail/descriptor tokens, key by display name
 _cat_words = {
     key: [w for w in re.split(r'[^a-zA-Z0-9]+', desc) if len(w) > 1]
     for key, desc in category_detail.items()
@@ -363,13 +364,9 @@ category_word_embeddings = {
     for key, words in _cat_words.items()
 }
 
-_unique_tags = tags_cleaned.explode().unique().tolist()
-_tag_emb_df = encode_cached(cat_m, category_model, _unique_tags, 'tag_embeddings_5.npy', _unique_tags)
-tag_embeddings = {tag: _tag_emb_df.loc[tag].values for tag in _unique_tags}
-
-_unique_title_tokens = tags_cleaned.explode().unique().tolist()
-_tag_emb_df = encode_cached(cat_m, category_model, _unique_tags, 'tag_embeddings_5.npy', _unique_tags)
-tag_embeddings = {tag: _tag_emb_df.loc[tag].values for tag in _unique_tags}
+# _unique_tags = tags_cleaned.explode().unique().tolist()
+# _tag_emb_df = encode_cached(cat_m, category_model, _unique_tags, 'tag_embeddings_1.npy', _unique_tags)
+# tag_embeddings = {tag: _tag_emb_df.loc[tag].values for tag in _unique_tags}
 
 adjusted_categories_df = infer_category_from_tags(categories_clean, threshold=0.05).set_index('id')
 adjusted_categories = adjusted_categories_df['final_cat']
@@ -413,10 +410,10 @@ selected_mdata = mdata_nlp[mdata_nlp.index.isin(selected_ids)]
 
 selected_mdata['channel'].value_counts().head(25)
 
-selected_tags = list(itertools.chain(*tags_cleaned.loc[selected_ids].values))
-pd.Series(selected_tags).value_counts().head(30)
+# selected_tags = list(itertools.chain(*tags_cleaned.loc[selected_ids].values))
+# pd.Series(selected_tags).value_counts().head(30)
 
-selected_channel = 'EDM Content'
+selected_channel = 'Adam Savage’s Tested'
 channel_vid_ids = mdata_nlp[mdata_nlp['channel'] == selected_channel].index
 category_change_summary(channel_vid_ids);
 
@@ -445,9 +442,9 @@ changed_gby = (
     .groupby(['og_cat', 'final_cat'], as_index=False)
     .size()
 )
-changed_gby['cat_change'] = changed_gby[['og_cat', 'final_cat']].apply(lambda x: '->'.join(x), axis=1)
+# changed_gby['cat_change'] = changed_gby[['og_cat', 'final_cat']].apply(lambda x: '->'.join(x), axis=1)
 
-og_filter_for = ['Film & Animation']
+og_filter_for = []
 best_filter_for = []
 
 mask = pd.Series(True, index=changed_gby.index)
@@ -778,7 +775,7 @@ SHAPE_MODE = True            # True → marker shape also encodes COLOR_BY varia
 fig, coords_df, umap_colors, shape_marker, cat_order, cat_angles, cat_colours = plot_circular_chart(
     umap_embeddings, umap_cats, sub_labels, watch_data,
     color_by=COLOR_BY, shape_mode=SHAPE_MODE,
-    save_path=f"charts/20k Sample Circle {datetime.today().strftime('%d-%b %H')}.svg",
+    save_path=f"charts/dev_samples/Development Sample ({round(len(umap_embeddings)/1000, 1)}k) {datetime.today().strftime('%d-%b %H')}.svg",
 )
 
 # MARK: Cluster Inspect
@@ -788,7 +785,7 @@ def sample_links(ids, n=2):
     return '  '.join(f'https://youtube.com/watch?v={i}' for i in sampled)
 
 # Select a category
-selected_cat = 'People & Blogs'
+selected_cat = 'Howto & Style'
 category_index = umap_cats[umap_cats==selected_cat].index
 
 category_sample = sub_labels.loc[category_index].to_frame()
@@ -803,17 +800,17 @@ print_out = (
             'channel':lambda x: Counter(x.values).most_common(5)
         })
 )
-print(f"{'Sub-Cluster':<25}{'Videos':<25}{'Top Channels':<25}")
+print(f"{'Sub-Cluster':<13}{'Videos':<13}{'Top Channels':<25}")
 for i, row in print_out.iterrows():
     _print = (
-        f"{str(row['sub_label']).replace('-1', 'NOISE'):<25}"
-        f"{row['index']:<25}"
-        + '| '.join([f"{cnt}-{ch}" for ch, cnt in dict(row['channel']).items()])
+        f"{str(row['sub_label']).replace('-1', 'NOISE'):<13}"
+        f"{row['index']:<13}"
+        + '| '.join([f"({cnt}) {ch}" for ch, cnt in dict(row['channel']).items()])
     )
     print(_print)
-
+#%%
 # Select a sub-cluster
-selected_sub_cluster = 0
+selected_sub_cluster = -1
 custom_subcluster = category_sample[category_sample == selected_sub_cluster].index
 
 s_df = umap_embeddings[umap_embeddings.index.isin(custom_subcluster)].copy()
