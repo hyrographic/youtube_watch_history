@@ -34,6 +34,7 @@ from scipy.ndimage import gaussian_filter1d
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sentence_transformers import SentenceTransformer
 from sklearn.cluster import HDBSCAN
+from sklearn.preprocessing import normalize
 
 from sklearn.decomposition import PCA
 import umap
@@ -76,18 +77,21 @@ mdata_nlp.drop(index=livestreams, inplace=True)
 
 media_types_dict = mdata_nlp['media_type'].to_dict()
 
+channels = mdata_nlp['channel'].fillna('None')
+
 categories = mdata_nlp['categories'].apply(lambda d: d[0] if isinstance(d, list) else 'None')
 categories.name = 'category'
 
 title_data = mdata_nlp[mdata_nlp['title'].notna()]
 titles = title_data['title']
 
-desc_data = mdata_nlp[mdata_nlp['description'].notna()]
+desc_data = mdata_nlp[(mdata_nlp['description'].notna()) & (mdata_nlp['description'] != '')]
 desc = desc_data['description']
 
 tags_data = mdata_nlp[(mdata_nlp['tags'].notna()) &(mdata_nlp['tags'].apply(len) > 0)]
 tags = tags_data['tags'].str.join(' ')
 
+# MARK: NLP Setup
 # ====== update stopwords ======
 stopwords_list = list(set(stopwords.words('english')))
 
@@ -101,7 +105,6 @@ with open(Path('resources/custom_stopwords.txt').resolve(), 'r') as f:
     str_replacements = {kv[0]:kv[1] for x in custom_stopwords if ':' in x for kv in [x.strip().lower().split(':')]}
 stopwords_list.extend(add_to_stopwords)
 
-# MARK: Embed Setup
 def create_transformer(model):
     return SentenceTransformer(model, trust_remote_code=True)
 
@@ -123,9 +126,25 @@ def encode_cached(m, transformer, values, file_name, index):
         np.save(fp, emb)
     return pd.DataFrame(emb, index=index)
 
+def tokenise(text, number_tokens=Literal['keep', 'drop']):
+    if not isinstance(text, str):
+        return []
+    allowed_chars = r"[a-z0-9']+"
+    tokens = [w for w in re.findall(allowed_chars, text.lower()) if w not in stopwords_list and len(w) > 1]
+    if number_tokens == 'drop':
+        tokens = [w for w in tokens if not bool(re.match(r'^[0-9]+$', w))]
+    return tokens
+
 # MARK: Clean Tags
 # ====== clean tags data ======
 tag_values = tags_data['tags'].explode()
+
+# get additional tags from description
+description_hashtags = desc.str.extractall(r'(\#[\w]+\b)')
+description_hashtags = description_hashtags.reset_index(level=1)[0].str.replace('#', '')
+description_hashtags.dropna(inplace=True)
+
+tag_values = pd.concat([tag_values, description_hashtags])
 
 tag_values = (
     tag_values
@@ -142,13 +161,13 @@ tag_values = tag_values.str.replace(' ?shorts ?', '', regex=1)
 tag_values = tag_values[~tag_values.isin(stopwords_list)] # redo stop words as new noise might be created after removing "shorts"
 # remove tags which reference the channel name
 _channel_regex = r'((\’|\')s|[^a-z0-9])'
-channels = mdata_nlp['channel'].str.lower().str.strip().str.replace(_channel_regex, '', regex=1)
+_channels_tmp = mdata_nlp['channel'].str.lower().str.strip().str.replace(_channel_regex, '', regex=1).fillna('')
 
 # remove tag == channel name
-tag_values = tag_values[tag_values.str.replace(_channel_regex, '', regex=1) != channels.reindex(tag_values.index)]
+tag_values = tag_values[tag_values.str.replace(_channel_regex, '', regex=1) != _channels_tmp.reindex(tag_values.index)]
 
 # remove tags within channel name
-tag_values = tag_values[[tag.replace(' ', '') not in channel for tag, channel in zip(tag_values, channels.reindex(tag_values.index))]]
+tag_values = tag_values[[tag.replace(' ', '') not in channel for tag, channel in zip(tag_values, _channels_tmp.reindex(tag_values.index))]]
 
 tag_values.dropna(inplace=True)
 
@@ -177,13 +196,8 @@ tags_cleaned = pd.concat([tag_values, *custom_additions]).groupby(level=0).agg(l
 
 # MARK: Clean Titles
 # ====== clean title data ======
-def tokenise(text):
-    if not isinstance(text, str):
-        return []
-    return [w for w in re.findall(r"[a-z0-9']+", text.lower()) if w not in stopwords_list and len(w) > 1]
-
 title_values = title_data['title']
-title_tokens = title_values.apply(tokenise).explode()
+title_tokens = title_values.apply(tokenise, number_tokens='drop').explode()
 
 title_tokens = (
     title_tokens
@@ -191,10 +205,6 @@ title_tokens = (
     .str.strip()
 )
 
-# remove stop words from tag values
-title_tokens = title_tokens[~title_tokens.isin(stopwords_list)]
-# remove tokens made of just numbers
-title_tokens = title_tokens[~title_tokens.str.match('^[0-9]+$')]
 # apply string replacements
 title_tokens = title_tokens.map(str_replacements, na_action=None).fillna(title_tokens)
 # remove shorts
@@ -219,6 +229,20 @@ remove_categories = [
 add_to_none = categories_clean.isin(remove_categories)
 categories_clean[add_to_none] = 'None'
 
+# MARK: Clean Description
+
+# remove hashtags (included in tags already)
+desc_values = desc.str.replace(r'(\#[\w]+\b)', '', regex=1)
+# remove links
+url_regex = r'(https?:\/\/)?(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)'
+desc_values = desc_values.str.replace(url_regex, '', regex=1)
+
+desc_tokens = desc_values.apply(tokenise, number_tokens='drop')
+desc_snippets = desc_tokens.str[:10].str.join(' ')
+
+# desc_token_count = pd.Series(dict(Counter(list(itertools.chain(*desc_tokens.values)))))
+# desc_token_count.sort_values(ascending=False).head(30)
+
 # MARK: Embeddings
 # %%
 # m = 'all-MiniLM-L6-v2' # fast model
@@ -234,21 +258,34 @@ sent_transformer = create_transformer(m)
 _combined_idx = titles_cleaned.index.union(tags_cleaned.index)
 _titles_aligned = titles_cleaned.reindex(_combined_idx)
 _tags_aligned = tags_cleaned.reindex(_combined_idx)
+_channels_aligned = channels.reindex(_combined_idx)
 
-def compose(vid_id, include_tags=True):
+def compose(vid_id, include_tags=True, fill_w_desc=True, min_tokens=10):
     parts = []
-    tag_list = _tags_aligned.loc[vid_id]
-    if include_tags:
-        if isinstance(tag_list, list) and tag_list:
-            parts.append(' '.join(tag_list[:10]))
+    channel = _channels_aligned.loc[vid_id]
+    if isinstance(channel, str) and channel:
+        parts.append(channel)
     title = _titles_aligned.loc[vid_id]
     if isinstance(title, str) and title:
         parts.append(title)
-    return ' | '.join(parts)
+    if include_tags:
+        tag_list = _tags_aligned.loc[vid_id]
+        if isinstance(tag_list, list) and tag_list:
+            parts.append(' '.join(tag_list[:10]))
+    composed = ' | '.join(parts)
+    
+    has_snippet = vid_id in desc_snippets
+    under_min = len(composed.split()) < min_tokens
+    if fill_w_desc and under_min and has_snippet:
+        snippet = desc_snippets.loc[vid_id]
+        if isinstance(snippet, str) and snippet:
+            composed = f"{composed} |- {snippet}"
+    return composed
 
-composed = pd.Series([compose(i, include_tags=True) for i in _combined_idx], index=_combined_idx)#.sample(round(len(_combined_idx)*0.3), random_state=5) # ! TESTING SAMPLE
+composed = pd.Series([compose(i) for i in _combined_idx], index=_combined_idx)
+#.sample(round(len(_combined_idx)*0.3), random_state=5) # ! TESTING SAMPLE
 
-composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'composed_full.npy', composed.index)
+composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'composed_with_desc_and_channel.npy', composed.index)
 composed_cats = categories.loc[composed.index].copy()
 
 # MARK: Fix Categories
@@ -256,105 +293,34 @@ composed_cats = categories.loc[composed.index].copy()
 cat_m = 'all-MiniLM-L6-v2'
 cat_m = 'nomic-ai/nomic-embed-text-v1.5'
 category_model = create_transformer(cat_m)
-# For each video, aggregate its tag embeddings and find nearest category
-def infer_category_from_tags(cats_series, threshold, verbose=False):
-    updated_categories = []
-    for i, original_category in tqdm(cats_series.items()):
-        if isinstance(original_category, list):
-            original_category = original_category[0]
-
-        # tag_list = tags_cleaned.get(i, [])
-        # if not tag_list:
-        #     updated_categories.append(
-        #         {'id':i,
-        #         'og_cat':original_category,
-        #         'og_cat_score':np.nan,
-        #         'alt_cat':np.nan,
-        #         'alt_cat_score':np.nan,
-        #         'changed': np.nan,
-        #         'score_diff':np.nan,
-        #         'final_cat':original_category
-        #         }
-        #     )
-        #     continue
-        
-        # Mean pool pre-cached tag embeddings
-        # tag_vecs = [tag_embeddings[t] for t in tag_list if t in tag_embeddings]
-        # if not tag_vecs:
-        #     updated_categories.append(
-        #         {'id':i,
-        #         'og_cat':original_category,
-        #         'og_cat_score':np.nan,
-        #         'alt_cat':np.nan,
-        #         'alt_cat_score':np.nan,
-        #         'changed': np.nan,
-        #         'score_diff':np.nan,
-        #         'final_cat':original_category
-        #         }
-        #     )
-        #     continue
-        # tag_centroid = np.mean(tag_vecs, axis=0)
-        if i in composed_embeddings.index:
-            composed_emb = composed_embeddings.loc[i]
-        else:
-            print(i)
-            print('Not found!')
-        
-        # Cosine sim to each category: max over per-word similarities
-        norm_tag = composed_emb / np.linalg.norm(composed_emb)
-        sims = {}
-        for cat, word_vecs in category_word_embeddings.items():
-            norm_words = word_vecs / np.linalg.norm(word_vecs, axis=1, keepdims=True)
-            sims[cat] = float((norm_words @ norm_tag).max())
-        
-        og_cat_score = sims.get(original_category, 0)
-
-        best_cat = max(sims, key=sims.get)
-        best_score = sims[best_cat]
-        
-        # Only override if confident enough
-        if verbose:
-            print('best_cat', best_cat, 'score', best_score)
-            print(best_score > threshold)
-        
-        change_cat = (best_score - og_cat_score) > threshold
-
-        updated_categories.append(
-            {'id':i,
-             'og_cat':original_category,
-             'og_cat_score':og_cat_score,
-             'alt_cat':best_cat,
-             'alt_cat_score':best_score,
-             'changed': all([change_cat, best_cat != original_category]),
-             'score_diff':f'{best_score - og_cat_score:+0.2f}',
-             'final_cat': best_cat if change_cat else original_category
-             }
-        )
-    return pd.json_normalize(updated_categories)
 
 category_detail = {
     'People & Blogs': 'people blogs culture job career workplace',
     'Entertainment': 'entertainment',
     'Gaming': 'gaming overwatch gta minecraft',
     'Comedy': 'comedy skit sketch',
-    'Science & Technology': 'science technology biology',
-    'Education': 'education history religion aviation law documentary howto tutorial',
+    'Science & Technology': 'science technology biology engineering',
+    'Education': 'education history religion aviation law documentary how-to tutorial',
     'Music': 'music art edm',
     'Sports': 'sports football',
     'Film & Animation': 'film animation movie tv',
     'Autos & Vehicles': 'autos vehicles cars',
-    'Travel & Events': 'travel',
+    'Travel & Events': 'travel adventure line-mission',
     'News & Politics': 'news politics events media',
-    'Pets & Animals': 'pets animals',
-    'Makers & Hobby':'diy printing 3dprinting maker tools'
+    'Pets & Animals': 'pets animals ',
+    'Makers & Hobby':'diy printing maker cad modelling electronics'
     # 'Howto & Style': 'howto tutorial cooking diy',
     # 'Coding, Data & Analysis':'data analysis tableau coding'
     # 'Cooking & Food':'cooking food'
 }
 
+category_rename = {
+    'Music':'Music & Arts'
+}
+
 # category embeddings from detail/descriptor tokens, key by display name
 _cat_words = {
-    key: [w for w in re.split(r'[^a-zA-Z0-9]+', desc) if len(w) > 1]
+    key: [w.replace('-', ' ') for w in re.split(r'[^a-zA-Z0-9\-]+', desc) if len(w) > 1]
     for key, desc in category_detail.items()
 }
 _unique_cat_words = sorted({w for words in _cat_words.values() for w in words})
@@ -364,14 +330,67 @@ category_word_embeddings = {
     for key, words in _cat_words.items()
 }
 
-# _unique_tags = tags_cleaned.explode().unique().tolist()
-# _tag_emb_df = encode_cached(cat_m, category_model, _unique_tags, 'tag_embeddings_1.npy', _unique_tags)
-# tag_embeddings = {tag: _tag_emb_df.loc[tag].values for tag in _unique_tags}
+# For each video, aggregate its tag embeddings and find nearest category
+threshold = 0.05
+updated_categories = []
+for i, original_category in tqdm(categories_clean.items()):
+    if isinstance(original_category, list):
+        original_category = original_category[0]
 
-adjusted_categories_df = infer_category_from_tags(categories_clean, threshold=0.05).set_index('id')
+    if i in composed_embeddings.index:
+        composed_emb = composed_embeddings.loc[i]
+    else:
+        print(i)
+        print('Not found!')
+    
+    # Cosine sim to each category: max over per-word similarities
+    norm_tag = composed_emb / np.linalg.norm(composed_emb)
+    sims = {}
+    for cat, word_vecs in category_word_embeddings.items():
+        norm_words = word_vecs / np.linalg.norm(word_vecs, axis=1, keepdims=True)
+        scores = norm_words @ norm_tag
+        best_idx = int(scores.argmax())
+        sims[cat] = {
+            'score': float(scores[best_idx]),
+            'word': category_detail[cat].split()[best_idx]
+        }
+    
+    og_cat_score = sims.get(original_category, {'score':0})['score']
+
+    best_cat = max(sims, key=lambda x: sims.get(x)['score'])
+    best_score = sims[best_cat]['score']
+    best_cat_detail = sims[best_cat]['word']
+    
+    # Only override if confident enough
+    # print('best_cat', best_cat, 'score', best_score)
+    # print(best_score > threshold)
+    # ordered list of sims with all category best detail word 
+    # print(f'Vid Emb Text: ', composed[i])
+    # print('\n'.join([
+    #     f"{sims[k]['score']:.3f} | {k} -> {sims[k]['score']:.3f}"
+    #     for k in sorted(sims, reverse=True, key=lambda x: sims[x]['score'])
+    # ]))
+    
+    change_cat = (best_score - og_cat_score) > threshold
+
+    updated_categories.append(
+        {'id':i,
+            'og_cat':original_category,
+            'og_cat_score':og_cat_score,
+            'alt_cat':best_cat,
+            'alt_cat_score':best_score,
+            'alt_cat_detail_word':best_cat_detail,
+            'changed': all([change_cat, best_cat != original_category]),
+            'score_diff':f'{best_score - og_cat_score:+0.3f}',
+            'final_cat': category_rename.get(best_cat, best_cat) if change_cat else category_rename.get(original_category, original_category)
+            }
+    )
+
+adjusted_categories_df = pd.json_normalize(updated_categories).set_index('id')
 adjusted_categories = adjusted_categories_df['final_cat']
 
 # MARK: Category Analysis
+# %% 
 def category_change_summary(vid_id_set=None):
     if isinstance(vid_id_set, list):
         df = adjusted_categories_df[adjusted_categories_df.isin(vid_id_set)].copy()
@@ -402,6 +421,7 @@ def category_change_summary(vid_id_set=None):
 
 category_change_summary();
 
+#%%
 # find random channels and tags
 c1 = adjusted_categories_df['og_cat'] == 'Film & Animation'
 c2 = adjusted_categories_df['alt_cat'] == 'Education'
@@ -413,13 +433,17 @@ selected_mdata['channel'].value_counts().head(25)
 # selected_tags = list(itertools.chain(*tags_cleaned.loc[selected_ids].values))
 # pd.Series(selected_tags).value_counts().head(30)
 
-selected_channel = 'Adam Savage’s Tested'
+selected_channel = 'Chris Boden'
 channel_vid_ids = mdata_nlp[mdata_nlp['channel'] == selected_channel].index
 category_change_summary(channel_vid_ids);
 
 channel_tags = tags_cleaned.loc[[_ for _ in channel_vid_ids if _ in tags_cleaned]]
 channel_selected_tags = list(itertools.chain(*channel_tags.values))
-pd.Series(channel_selected_tags).value_counts().head(30)
+pd.Series(channel_selected_tags).value_counts().head(29)
+
+selected_channel_adj_info = adjusted_categories_df.loc[channel_vid_ids]
+selected_channel_adj_info[selected_channel_adj_info['final_cat'] == 'Makers & Hobby']
+selected_channel_adj_info
 
 # %%
 # print tags per category
@@ -431,7 +455,6 @@ for _cat, ids in ids_per_cat.items():
     tags_flat = list(itertools.chain(*tags_cleaned.loc[ids].values))
     print(pd.Series(tags_flat).value_counts().head(10))
     print('\n')
-
 
 # MARK: Category Sankey
 # %%
@@ -727,33 +750,61 @@ def plot_circular_chart(
 # masked_cats = composed_cats.loc[mask] # youtube generated categories
 # masked_cats = composed_cats.loc[mask] # reassigned categories
 
+# PCA before UMAP (from docs: Consider a typical pipeline: high-dimensional embedding (300+) => PCA to reduce to 50 dimensions => UMAP to reduce to 10-20 dimensions => HDBSCAN for clustering / some plain algorithm for classification;)
+# https://umap-learn.readthedocs.io/en/latest/faq.html#the-clusters-are-all-squashed-together-and-i-can-t-see-internal-structure
+print('PCA...')
+pca = PCA(n_components=50)
+pca_embeddings = pd.DataFrame(pca.fit_transform(composed_embeddings), index=composed_embeddings.index)
+print('PCA ✔')
+
+pca_normalised = pd.DataFrame(normalize(pca_embeddings), index=composed_embeddings.index)
+
 n_components = 2
-n_neighbors = 16  # low = local structure / sub-clusters; high = global topology
+n_neighbors = 20
+min_dist = 0.15
 
 dim_reduction_model = umap.UMAP(
     n_neighbors=n_neighbors,
-    min_dist=0.0,   # 0 = maximum internal compactness
-    spread=3.0,     # spread clusters apart from each other (pairs with min_dist)
+    min_dist=min_dist,
+    spread=5.0,
     n_components=n_components,
-    # metric='correlation'
+    random_state=15
 )
-umap_embeddings = pd.DataFrame(dim_reduction_model.fit_transform(composed_embeddings), index=composed_embeddings.index)
+# umap_embeddings = pd.DataFrame(dim_reduction_model.fit_transform(composed_embeddings), index=composed_embeddings.index)
+# umap_cats = adjusted_categories.loc[umap_embeddings.index].copy()
 
-# umap_cats = categories.loc[umap_embeddings.index].copy() # youtube generated categories
-umap_cats = adjusted_categories.loc[umap_embeddings.index].copy() # reassigned categories
+umap_embeddings = pd.DataFrame(index=composed_embeddings.index, columns=[0, 1], dtype=float)
+umap_cats = adjusted_categories.loc[umap_embeddings.index].copy()
+
+print('UMAP...')
+# Per-category UMAP overwrite
+per_cat_umap = umap.UMAP(
+    n_neighbors=n_neighbors,
+    min_dist=min_dist,
+    spread=5.0,
+    n_components=n_components,
+    metric='cosine'
+)
+for cat, idx in umap_cats.groupby(umap_cats).groups.items():
+    if len(idx) < n_neighbors + 1:
+        continue
+    cat_embs = pca_normalised.loc[idx]
+    local_umap = per_cat_umap.fit_transform(cat_embs)
+    umap_embeddings.loc[idx] = local_umap
+print('UMAP ✔')
 
 # Per-category HDBSCAN sub-clustering
 def get_hdbscan_params(n_points):
     return dict(
-        # ~2% of category
         min_cluster_size=max(5, int(n_points * 0.02)),
-        # ~0.5% of category
-        min_samples=max(3, int(n_points * 0.0025)),
+        min_samples=max(3, int(n_points * 0.0001)),
         cluster_selection_epsilon=0.0,
+        cluster_selection_method = 'leaf',
         metric='euclidean',
         copy=True
     )
 
+print('HDBSCAN...')
 sub_labels = pd.Series(-1, index=umap_embeddings.index, name='sub_label', dtype=int)
 for cat, idx in umap_cats.groupby(umap_cats).groups.items():
     pts = umap_embeddings.loc[idx]
@@ -763,14 +814,11 @@ for cat, idx in umap_cats.groupby(umap_cats).groups.items():
         continue
     local_labels = sub_hdb.fit_predict(pts)
     sub_labels.loc[idx] = local_labels
-    # print('Category: ', cat)
-    # print('Num watches: ', len(local_labels))
-    # print('Num sub-clusters: ', len(set(local_labels)))
-    # print('\n')
+print('HDBSCAN ✔')
 
 # draw plot
-COLOR_BY   = 'subcluster'   # 'subcluster' | 'channel' | 'category'
-SHAPE_MODE = True            # True → marker shape also encodes COLOR_BY variable
+COLOR_BY   = 'subcluster'
+SHAPE_MODE = True
 
 fig, coords_df, umap_colors, shape_marker, cat_order, cat_angles, cat_colours = plot_circular_chart(
     umap_embeddings, umap_cats, sub_labels, watch_data,
@@ -785,7 +833,7 @@ def sample_links(ids, n=2):
     return '  '.join(f'https://youtube.com/watch?v={i}' for i in sampled)
 
 # Select a category
-selected_cat = 'Howto & Style'
+selected_cat = 'Music & Arts'
 category_index = umap_cats[umap_cats==selected_cat].index
 
 category_sample = sub_labels.loc[category_index].to_frame()
@@ -801,7 +849,7 @@ print_out = (
         })
 )
 print(f"{'Sub-Cluster':<13}{'Videos':<13}{'Top Channels':<25}")
-for i, row in print_out.iterrows():
+for i, row in print_out.sort_values('index', ascending=False).iterrows():
     _print = (
         f"{str(row['sub_label']).replace('-1', 'NOISE'):<13}"
         f"{row['index']:<13}"
@@ -810,8 +858,13 @@ for i, row in print_out.iterrows():
     print(_print)
 #%%
 # Select a sub-cluster
+custom_subcluster = category_sample.copy()
+
 selected_sub_cluster = -1
-custom_subcluster = category_sample[category_sample == selected_sub_cluster].index
+custom_subcluster = custom_subcluster[custom_subcluster['sub_label'] == selected_sub_cluster].index
+
+channel_filter = mdata_nlp[mdata_nlp['channel'] == 'Tracklib'].index
+custom_subcluster = [x for x in custom_subcluster if x in channel_filter]
 
 s_df = umap_embeddings[umap_embeddings.index.isin(custom_subcluster)].copy()
 s_ids = s_df.index.tolist()
@@ -822,7 +875,7 @@ s_watch_data['media_type'] = s_watch_data['id'].map(mdata_nlp['media_type'])
 s_watch_data['tags'] = s_watch_data['id'].map(mdata_nlp['tags'])
 s_watch_data['categories'] = s_watch_data['id'].map(mdata_nlp['categories'])
 s_watch_data['title'] = s_watch_data['id'].map(mdata_nlp['title'])
-s_watch_data['title_tokens'] = s_watch_data['title'].apply(tokenise)
+s_watch_data['title_tokens'] = s_watch_data['title'].apply(tokenise, number_tokens='drop')
 
 print('Watched from: ', s_watch_data['date'].min(), ' to ', s_watch_data['date'].max())
 
@@ -876,6 +929,9 @@ print_top_n('tags', data=s_watch_data.explode('tags').fillna('**no tags**'))
 print_top_n('categories', data=s_watch_data.explode('categories').fillna('**no category**'))
 
 print_top_n('title_tokens', data=s_watch_data.explode('title_tokens').dropna())
+
+_ = composed.loc[s_ids].sample(min(len(s_ids), 10))
+print('\n'.join(f"{idx} | {val}" for idx, val in _.items()))
 #%%
 
 # MARK: Animation
