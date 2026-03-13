@@ -37,6 +37,9 @@ from sklearn.cluster import HDBSCAN
 from sklearn.preprocessing import normalize
 
 from sklearn.decomposition import PCA
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer
 import umap
 
 # nlp
@@ -230,9 +233,9 @@ add_to_none = categories_clean.isin(remove_categories)
 categories_clean[add_to_none] = 'None'
 
 # MARK: Clean Description
-
 # remove hashtags (included in tags already)
 desc_values = desc.str.replace(r'(\#[\w]+\b)', '', regex=1)
+
 # remove links
 url_regex = r'(https?:\/\/)?(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)'
 desc_values = desc_values.str.replace(url_regex, '', regex=1)
@@ -260,6 +263,8 @@ _titles_aligned = titles_cleaned.reindex(_combined_idx)
 _tags_aligned = tags_cleaned.reindex(_combined_idx)
 _channels_aligned = channels.reindex(_combined_idx)
 
+snippet_used_counter = defaultdict(int)
+
 def compose(vid_id, include_tags=True, fill_w_desc=True, min_tokens=10):
     parts = []
     channel = _channels_aligned.loc[vid_id]
@@ -277,16 +282,18 @@ def compose(vid_id, include_tags=True, fill_w_desc=True, min_tokens=10):
     has_snippet = vid_id in desc_snippets
     under_min = len(composed.split()) < min_tokens
     if fill_w_desc and under_min and has_snippet:
+        global snippet_used_counter
+        snippet_used_counter += 1
         snippet = desc_snippets.loc[vid_id]
         if isinstance(snippet, str) and snippet:
-            composed = f"{composed} |- {snippet}"
+            composed = f"{composed} | {snippet}"
     return composed
 
 composed = pd.Series([compose(i) for i in _combined_idx], index=_combined_idx)
 #.sample(round(len(_combined_idx)*0.3), random_state=5) # ! TESTING SAMPLE
 
-composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'composed_with_desc_and_channel.npy', composed.index)
-composed_cats = categories.loc[composed.index].copy()
+# composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'composed_with_desc_and_channel.npy', composed.index)
+# composed_cats = categories.loc[composed.index].copy()
 
 # MARK: Fix Categories
 # %%
@@ -295,7 +302,7 @@ cat_m = 'nomic-ai/nomic-embed-text-v1.5'
 category_model = create_transformer(cat_m)
 
 category_detail = {
-    'People & Blogs': 'people blogs culture job career workplace',
+    'People & Blogs': 'blogs culture job career workplace',
     'Entertainment': 'entertainment',
     'Gaming': 'gaming overwatch gta minecraft',
     'Comedy': 'comedy skit sketch',
@@ -345,6 +352,8 @@ for i, original_category in tqdm(categories_clean.items()):
     
     # Cosine sim to each category: max over per-word similarities
     norm_tag = composed_emb / np.linalg.norm(composed_emb)
+    # norm_tag = (single_emb / np.linalg.norm(single_emb)).median(axis=0)
+
     sims = {}
     for cat, word_vecs in category_word_embeddings.items():
         norm_words = word_vecs / np.linalg.norm(word_vecs, axis=1, keepdims=True)
@@ -367,7 +376,7 @@ for i, original_category in tqdm(categories_clean.items()):
     # ordered list of sims with all category best detail word 
     # print(f'Vid Emb Text: ', composed[i])
     # print('\n'.join([
-    #     f"{sims[k]['score']:.3f} | {k} -> {sims[k]['score']:.3f}"
+    #     f"{sims[k]['score']:.3f} | {k} ({sims[k]['word']} -> {sims[k]['score']:.3f})"
     #     for k in sorted(sims, reverse=True, key=lambda x: sims[x]['score'])
     # ]))
     
@@ -672,7 +681,7 @@ def plot_circular_chart(
         ])
 
         spread = np.abs(rel).max() or 1.0
-        rotated /= spread * (2.0 / target_r)
+        rotated /= spread * (2.4 / target_r)
 
         tx = target_r * np.cos(target_angle)
         ty = target_r * np.sin(target_angle)
@@ -752,68 +761,110 @@ def plot_circular_chart(
 
 # PCA before UMAP (from docs: Consider a typical pipeline: high-dimensional embedding (300+) => PCA to reduce to 50 dimensions => UMAP to reduce to 10-20 dimensions => HDBSCAN for clustering / some plain algorithm for classification;)
 # https://umap-learn.readthedocs.io/en/latest/faq.html#the-clusters-are-all-squashed-together-and-i-can-t-see-internal-structure
-print('PCA...')
-pca = PCA(n_components=50)
-pca_embeddings = pd.DataFrame(pca.fit_transform(composed_embeddings), index=composed_embeddings.index)
-print('PCA ✔')
 
-pca_normalised = pd.DataFrame(normalize(pca_embeddings), index=composed_embeddings.index)
+# Custom transformers
+class PerCategoryUMAPTransformer(BaseEstimator, TransformerMixin):
+    def __init__(self, n_neighbors=20, min_dist=0.15, spread=5.0, n_components=2, metric='cosine'):
+        self.n_neighbors = n_neighbors
+        self.min_dist    = min_dist
+        self.spread      = spread
+        self.n_components = n_components
+        self.metric      = metric
 
-n_components = 2
-n_neighbors = 20
-min_dist = 0.15
+    def fit(self, X, y=None):
+        self.categories_ = y  # y = per-video category Series
+        return self
 
-dim_reduction_model = umap.UMAP(
-    n_neighbors=n_neighbors,
-    min_dist=min_dist,
-    spread=5.0,
-    n_components=n_components,
-    random_state=15
-)
-# umap_embeddings = pd.DataFrame(dim_reduction_model.fit_transform(composed_embeddings), index=composed_embeddings.index)
-# umap_cats = adjusted_categories.loc[umap_embeddings.index].copy()
+    def transform(self, X):
+        umap_model = umap.UMAP(
+            n_neighbors=self.n_neighbors,
+            min_dist=self.min_dist,
+            spread=self.spread,
+            n_components=self.n_components,
+            metric=self.metric,
+        )
+        result = pd.DataFrame(index=X.index, columns=range(self.n_components), dtype=float)
+        for cat, idx in self.categories_.groupby(self.categories_).groups.items():
+            if len(idx) < self.n_neighbors + 1:
+                continue
+            result.loc[idx] = umap_model.fit_transform(X.loc[idx])
+        return result
 
-umap_embeddings = pd.DataFrame(index=composed_embeddings.index, columns=[0, 1], dtype=float)
-umap_cats = adjusted_categories.loc[umap_embeddings.index].copy()
 
-print('UMAP...')
-# Per-category UMAP overwrite
-per_cat_umap = umap.UMAP(
-    n_neighbors=n_neighbors,
-    min_dist=min_dist,
-    spread=5.0,
-    n_components=n_components,
-    metric='cosine'
-)
-for cat, idx in umap_cats.groupby(umap_cats).groups.items():
-    if len(idx) < n_neighbors + 1:
-        continue
-    cat_embs = pca_normalised.loc[idx]
-    local_umap = per_cat_umap.fit_transform(cat_embs)
-    umap_embeddings.loc[idx] = local_umap
-print('UMAP ✔')
+class PerCategoryHDBSCAN(BaseEstimator):
+    """Runs HDBSCAN per category; cluster size params scale with category size."""
+    def __init__(self, min_cluster_size_frac=0.02, min_cluster_size_floor=5,
+                 min_samples_frac=0.0001, min_samples_floor=3,
+                 cluster_selection_epsilon=0.0, cluster_selection_method='leaf'):
+        self.min_cluster_size_frac    = min_cluster_size_frac
+        self.min_cluster_size_floor   = min_cluster_size_floor
+        self.min_samples_frac         = min_samples_frac
+        self.min_samples_floor        = min_samples_floor
+        self.cluster_selection_epsilon = cluster_selection_epsilon
+        self.cluster_selection_method  = cluster_selection_method
 
-# Per-category HDBSCAN sub-clustering
-def get_hdbscan_params(n_points):
-    return dict(
-        min_cluster_size=max(5, int(n_points * 0.02)),
-        min_samples=max(3, int(n_points * 0.0001)),
-        cluster_selection_epsilon=0.0,
-        cluster_selection_method = 'leaf',
-        metric='euclidean',
-        copy=True
-    )
+    def _params_for(self, n_points):
+        return dict(
+            min_cluster_size=max(self.min_cluster_size_floor, int(n_points * self.min_cluster_size_frac)),
+            min_samples=max(self.min_samples_floor, int(n_points * self.min_samples_frac)),
+            cluster_selection_epsilon=self.cluster_selection_epsilon,
+            cluster_selection_method=self.cluster_selection_method,
+            metric='euclidean',
+            copy=True,
+        )
+
+    def fit_predict(self, X, y):  # y = per-video category Series
+        labels = pd.Series(-1, index=X.index, name='sub_label', dtype=int)
+        for cat, idx in y.groupby(y).groups.items():
+            pts    = X.loc[idx]
+            params = self._params_for(len(pts))
+            model  = HDBSCAN(**params)
+            if len(pts) < model.min_cluster_size:
+                continue
+            labels.loc[idx] = model.fit_predict(pts)
+        return labels
+
+# Parameters
+
+EMBEDDING_PARAMS = {
+    'pca__n_components': 100,
+    'umap__n_neighbors': 150,
+    'umap__min_dist':    1.5,
+    'umap__spread':      5.0,
+    'umap__n_components': 2,
+    'umap__metric':      'cosine',
+}
+
+HDBSCAN_PARAMS = {
+    'min_cluster_size_frac':    0.005,
+    'min_cluster_size_floor':   30,
+    'min_samples_frac':         0.001,
+    'min_samples_floor':        80,
+    'cluster_selection_epsilon': 0.0,
+    'cluster_selection_method': 'leaf'
+}
+
+# Pipeline
+
+def _normalize_df(X):
+    return pd.DataFrame(normalize(X), index=X.index)
+
+embedding_pipeline = Pipeline([
+    ('pca',       PCA()),
+    ('normalize', FunctionTransformer(_normalize_df)),
+    ('umap',      PerCategoryUMAPTransformer()),
+])
+embedding_pipeline.set_params(**EMBEDDING_PARAMS)
+embedding_pipeline.named_steps['pca'].set_output(transform="pandas")
+
+print('PCA + Normalise + UMAP...')
+umap_cats = adjusted_categories.loc[composed_embeddings.index].copy()
+umap_embeddings = embedding_pipeline.fit_transform(composed_embeddings, y=umap_cats)
+print('PCA + Normalise + UMAP ✔')
 
 print('HDBSCAN...')
-sub_labels = pd.Series(-1, index=umap_embeddings.index, name='sub_label', dtype=int)
-for cat, idx in umap_cats.groupby(umap_cats).groups.items():
-    pts = umap_embeddings.loc[idx]
-    params = get_hdbscan_params(len(pts))
-    sub_hdb = HDBSCAN(**params)
-    if len(pts) < sub_hdb.min_cluster_size:
-        continue
-    local_labels = sub_hdb.fit_predict(pts)
-    sub_labels.loc[idx] = local_labels
+hdbscan_model = PerCategoryHDBSCAN(**HDBSCAN_PARAMS)
+sub_labels = hdbscan_model.fit_predict(umap_embeddings, y=umap_cats)
 print('HDBSCAN ✔')
 
 # draw plot
@@ -826,7 +877,7 @@ fig, coords_df, umap_colors, shape_marker, cat_order, cat_angles, cat_colours = 
     save_path=f"charts/dev_samples/Development Sample ({round(len(umap_embeddings)/1000, 1)}k) {datetime.today().strftime('%d-%b %H')}.svg",
 )
 
-# MARK: Cluster Inspect
+# MARK: Cluster Summary
 #%%
 def sample_links(ids, n=2):
     sampled = random.sample(ids, min(n, len(ids)))
@@ -834,9 +885,9 @@ def sample_links(ids, n=2):
 
 # Select a category
 selected_cat = 'Music & Arts'
-category_index = umap_cats[umap_cats==selected_cat].index
+selected_cat_index = umap_cats[umap_cats==selected_cat].index
 
-category_sample = sub_labels.loc[category_index].to_frame()
+category_sample = sub_labels.loc[selected_cat_index].to_frame()
 category_sample['channel'] = category_sample.index.map(mdata_nlp['channel'])
 print(f'{selected_cat} cluster: ')
 print_out = (
@@ -857,19 +908,25 @@ for i, row in print_out.sort_values('index', ascending=False).iterrows():
     )
     print(_print)
 #%%
+#MARK: Inspection 
+inspect_index = {}
+
+selected_cat = 'Autos & Vehicles'
+inspect_index['category'] = umap_cats[umap_cats==selected_cat].index
+
 # Select a sub-cluster
-custom_subcluster = category_sample.copy()
+selected_sub_cluster = 35
+# inspect_index['subcluster'] = sub_labels[sub_labels == selected_sub_cluster].index
 
-selected_sub_cluster = -1
-custom_subcluster = custom_subcluster[custom_subcluster['sub_label'] == selected_sub_cluster].index
+# select a channel
+selected_channel = 'Vsauce'
+inspect_index['channel'] = channels[channels == selected_channel].index
 
-channel_filter = mdata_nlp[mdata_nlp['channel'] == 'Tracklib'].index
-custom_subcluster = [x for x in custom_subcluster if x in channel_filter]
-
-s_df = umap_embeddings[umap_embeddings.index.isin(custom_subcluster)].copy()
+inspect_union = list(set.intersection(*[set(v) for v in inspect_index.values()]))
+s_df = umap_embeddings.loc[inspect_union].copy()
 s_ids = s_df.index.tolist()
-print(f'Videos in category {selected_cat}: ', len(category_sample))
-print(f'Videos in {selected_cat} sub-cluster {selected_sub_cluster}: ', len(s_df))
+
+
 s_watch_data = watch_data[watch_data['id'].isin(s_ids)].copy()
 s_watch_data['media_type'] = s_watch_data['id'].map(mdata_nlp['media_type'])
 s_watch_data['tags'] = s_watch_data['id'].map(mdata_nlp['tags'])
@@ -877,17 +934,54 @@ s_watch_data['categories'] = s_watch_data['id'].map(mdata_nlp['categories'])
 s_watch_data['title'] = s_watch_data['id'].map(mdata_nlp['title'])
 s_watch_data['title_tokens'] = s_watch_data['title'].apply(tokenise, number_tokens='drop')
 
+for k, v in inspect_index.items():
+    print(f'{k}: {len(v)} videos')
+
 print('Watched from: ', s_watch_data['date'].min(), ' to ', s_watch_data['date'].max())
 
 # ── Weekly watch bar chart ───────────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(18, 3))
+fig, ax = plt.subplots(figsize=(17.5, 5))
 
-weekly = s_watch_data.set_index('date').resample('W')['id'].count()
-ax.bar(weekly.index, weekly.values, width=6, color='steelblue', alpha=0.8)
+weekly = s_watch_data.groupby(['media_type', pd.Grouper(key='date', freq='W')])['id'].count().reset_index()
+
+media_type_colors = {
+    'short': '#e84118',
+    'video': '#192a56',
+    'livestream': '#4cd137'
+}
+
+sns.lineplot(data=weekly, x='date', y='id', hue='media_type', linewidth=4.5, palette=media_type_colors, alpha=0.8, ax=ax)
+
+# pivot for easy access
+weekly_pivot = weekly.pivot(index='date', columns='media_type', values='id').fillna(0)
+
+# add count labels along bottom for videos
+weekly_pivot_monthly = weekly_pivot.resample('ME').sum()
+
+if 'video' in weekly_pivot_monthly:
+    for date, val in weekly_pivot_monthly['video'].items():
+        if val > 0:
+            ax.text(date, -ax.get_ylim()[1] * 0.05, f'{int(val):,}',
+                   ha='center', va='top', fontsize=11, fontweight='bold', 
+                   color=media_type_colors['video'], rotation=45)
+
+if 'short' in weekly_pivot_monthly:
+    for date, val in weekly_pivot_monthly['short'].items():
+        if val > 0:
+            ax.text(date, ax.get_ylim()[1] * 0.95, f'{int(val):,}',
+                   ha='center', va='bottom', fontsize=11, fontweight='bold', 
+                   color=media_type_colors['short'], rotation=45)
+
+# make space above and below
+ax.set_ylim(-ax.get_ylim()[1] * 0.25, ax.get_ylim()[1] * 1.15)
+
+# set legend to underneath the chart
+ax.legend(title='Media Type', loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=3)
 
 ax.set_xlabel('Week')
 ax.set_ylabel('Videos watched')
 ax.set_title(f'weekly watch activity | category {selected_cat} | sub-cluster: {selected_sub_cluster}')
+ax.grid(alpha=0.3)
 plt.xticks(rotation=45, ha='right')
 plt.tight_layout()
 plt.show()
@@ -900,26 +994,51 @@ plot_circular_chart(
 )
 
 # ── Top Vals  ────────────────────────────────────────────────────────────────
+def _yt_link(video_id: str) -> str:
+    return f"https://youtu.be/{video_id}"
+
 def print_top_n(feature: str, n=25, breakdown='media_type', data=s_watch_data):
-    breakdown_vals = data[breakdown].unique().tolist()
-    media_gby = data.groupby([breakdown])[feature].apply(lambda x: Counter(x).most_common(n))
+    clean = data[data[feature].notna() & data[breakdown].notna()]
+    breakdown_vals = clean[breakdown].unique().tolist()
+    
+    media_gby = (
+        clean.groupby(breakdown)[feature]
+        .apply(lambda x: Counter(x.dropna()).most_common(n))
+        .apply(lambda x: x + [('', 0)] * (n - len(x)))
+    )
+    
     top_feature_by_media = (
         media_gby
-        .apply(lambda x: sorted(x, reverse=1, key=lambda i: i[1]))
-        .apply(lambda x: x + [('', 0) for i in range(n - len(x))])
         .explode()
         .to_frame()
         .reset_index()
         .pivot_table(columns=[breakdown], aggfunc=list)
         .explode(breakdown_vals)
     )
-    print(f"Top {n} {top_feature_by_media.index[0]} values by {breakdown}")
-    _cols = top_feature_by_media.columns
-    print(''.join(f"{cl:<30}" for cl in _cols))
-    for i, row in top_feature_by_media.iterrows():
-        if all(row.str[1] == 0):
-            continue
-        print(''.join(f"{row[bv][1]:<2} | {row[bv][0]:<28}" for bv in row.index))
+
+    # Build lookup: (breakdown_val, feature_val) → example video id
+    examples: dict[tuple, str] = {}
+    for bv, grp in clean.groupby(breakdown):
+        for fv, sub in grp.groupby(feature):
+            examples[(bv, fv)] = sub['id'].sample(1).iloc[0]
+
+    CELL = 55
+    print(f'TOP {feature.replace('channel_title', 'channels').upper()}')
+    print(''.join(f"{cl:<{CELL}}" for cl in top_feature_by_media.columns))
+    
+    for _, row in top_feature_by_media.iterrows():
+        cells = []
+        for bv in breakdown_vals:
+            val, cnt = row.get(bv, ('', 0))
+            if not val or cnt == 0:
+                cells.append(f"{'':{ CELL}}")
+                continue
+            link = _yt_link(examples[(bv, val)]) if (bv, val) in examples else ''
+            cells.append(f"{cnt:<2}| {str(val)[:26]:<26} {link:<23}")
+        
+        if any(c.strip() for c in cells):
+            print(' '.join(cells))
+    
     print('\n')
 
 print_top_n('channel_title')
