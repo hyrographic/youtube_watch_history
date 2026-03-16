@@ -1077,12 +1077,12 @@ renderer = UMAPAnimationRenderer(
     fps=30,
     seconds_per_day=0.2,
     window_size=15,
-    glow_size=1.5,
+    glow_size=1,
     scale_by_duration=True,
     duration_min_size=7,
     duration_max_size=13,
     core_point_size=2,
-    glow_layers=UMAPAnimationRenderer().make_glow_layers(n_rings=12, max_size=7, max_alpha=0.2)
+    glow_layers=UMAPAnimationRenderer().make_glow_layers(n_rings=6, max_size=7, max_alpha=0.2)
 )
 
 # ── Pre-compute shared inputs ──────────────────────────────────────────────────
@@ -1095,9 +1095,11 @@ duration_series = pd.Series(
     index=umap_embeddings.index,
 )
 
+video_ids = mdata_nlp[mdata_nlp['media_type'] == 'video'].index
 render_range = watch_data[
     (watch_data['date'].dt.to_period('D') >= '2025-01-01') &
-    (watch_data['date'].dt.to_period('D') <= '2025-03-01')
+    (watch_data['date'].dt.to_period('D') <= '2025-03-01') &
+    (watch_data['id'].isin(video_ids))
 ].copy()
 render_range = render_range[render_range['id'].isin(umap_embeddings.index)]
 
@@ -1123,7 +1125,7 @@ renderer.render(
     coords_df=coords_df,
     colors_series=colors_series,
     is_noise_series=is_noise,
-    output_dir='charts/frames_v11',
+    output_dir='charts/frames_v13',
     marker_series=sub_labels,
     shape_marker=shape_marker,
     duration_series=duration_series,
