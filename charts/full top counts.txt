@@ -1,0 +1,109 @@
+Top 25 channel_title values by media_type
+
+short                                                  video                                                  
+172| Sleepless Historian        https://youtu.be/mwuNG36_xF8 539| Vsauce                     https://youtu.be/f4wzUEQxurM
+163| Belief It Or Not           https://youtu.be/pV8OhzXEHKs 489| DarkViperAU                https://youtu.be/ba9aPiOWVQs
+138| GIULIANO                   https://youtu.be/x4JNfW3y0h0 379| al jokes                   https://youtu.be/u-FZpDpGl-Y
+131| Marques Brownlee           https://youtu.be/pMX2cQdPubk 308| Zack D. Films              https://youtu.be/6kDyZ8sRzDY
+118| Mentour Pilot              https://youtu.be/fT6r9_wmT20 307| Chris Boden                https://youtu.be/V8kULtvDzMw
+106| Brian Tyler Cohen          https://youtu.be/-IcXgHUA8Ws 288| UFD Tech                   https://youtu.be/h_rkUzoL0FE
+101| Chris Norlund              https://youtu.be/j-MVKiaZnbQ 287| Very Important People      https://youtu.be/rRWl7m-ZY4E
+92| Vsauce                     https://youtu.be/2eUDExCeayw 284| Cole Anderson-James        https://youtu.be/njL1T40P1yA
+85| In Deep Geek               https://youtu.be/_C9hXqXRopI 272| that's a bad idea          https://youtu.be/VH90_EpBSiA
+82| NPR Music                  https://youtu.be/1alXHOMDBN4 263| The Scumbag Dad            https://youtu.be/fBA6XPE2t28
+74| Uprise                     https://youtu.be/qhUyit-rYLk 250| Red Bull                   https://youtu.be/t34muYc261o
+58| Georg Rockall-Schmidt      https://youtu.be/Rk8E6Jjytt8 232| Prism                      https://youtu.be/JhB_WPnwAwU
+57| ClarkeAndDawe              https://youtu.be/YiDDPMw8VO0 204| NXCRE                      https://youtu.be/LAIcWcu2QGE
+56| Flashgitz                  https://youtu.be/bw-ThW5TfZU 197| SciManDan                  https://youtu.be/F7BFQlZaDJA
+54| Jago Hazzard               https://youtu.be/_4ANmUkGIJc 185| Daily Dose Of Internet     https://youtu.be/em3dYMbAJis
+53| JCS - Criminal Psychology  https://youtu.be/jJZv3z7FOt0 175| Action Lab Shorts          https://youtu.be/9cExml-ue4E
+53| Alt Shift X                https://youtu.be/vpDHG7YrihQ 172| JaDropping Science         https://youtu.be/oJ-oGu6d25Q
+53| Arrge                      https://youtu.be/zvH0PAVOYrI 167| American High              https://youtu.be/bwOOq8yjYvM
+51| Technology Connections     https://youtu.be/8I4Jc-WLsrs 167| Pirate Software            https://youtu.be/KKCN4AsanYc
+51| CGP Grey                   https://youtu.be/n1KgxqEQn0A 148| GooseWayne                 https://youtu.be/laPlqiMCMYU
+50| GeoWizard                  https://youtu.be/l8m7DvNEn0k 144| DrDonut Clips              https://youtu.be/AlpG_KaocUc
+44| SciManDan                  https://youtu.be/1T2RyJmM46s 140| magnify                    https://youtu.be/rZ7OhYBkAy0
+44| Tom Scott                  https://youtu.be/b5Oy29TEVOE 139| NileRed                    https://youtu.be/7FKOicBjYqs
+44| Renaissance Periodization  https://youtu.be/Wpf7G7E1Jzw 139| sidequestz                 https://youtu.be/j5pJXQkglqs
+43| Bog                        https://youtu.be/tcvMq-K5Bnc 135| Edward So                  https://youtu.be/X7YHQfkEOOA
+
+
+Top 25 tags values by media_type
+
+**no tags**                                            short                                                  video                                                  
+3526| **no tags**                https://youtu.be/Rfie7X36BWc 58110| **no tags**                https://youtu.be/kUCvptiExK0 12373| **no tags**                https://youtu.be/udm6TzG8wvo
+348| funny                      https://youtu.be/IhO1XlHVNUA 2752| shorts                     https://youtu.be/hm9YeYgfv20                                                        
+338| science                    https://youtu.be/mxhxL1LzKww 1911| funny                      https://youtu.be/rp0MmgokJqE                                                        
+261| news                       https://youtu.be/cOHDCf1mHB0 1318| comedy                     https://youtu.be/JivyhG9W2WA                                                        
+232| religion                   https://youtu.be/ngjQs_QjSwc 943| science                    https://youtu.be/8p7Kt_MJMjQ                                                        
+226| comedy                     https://youtu.be/IHQr0HCIN2w 854| viral                      https://youtu.be/CymUxIi0rUM                                                        
+224| skeptic                    https://youtu.be/hbWoD-UPcKI 735| Shorts                     https://youtu.be/W8bFfrbYcnE                                                        
+216| History                    https://youtu.be/-vgFeVeg2TE 722| Science                    https://youtu.be/9d1UDDbZj2s                                                        
+212| documentary                https://youtu.be/b-pOMhQoAxg 682| memes                      https://youtu.be/CP9zdEwxZQ0                                                        
+203| atheist                    https://youtu.be/9380OS8CoUE 640| tiktok                     https://youtu.be/AWdicsM83vs                                                        
+192| sleep                      https://youtu.be/iZBOiNrKAto 637| minecraft                  https://youtu.be/mLd_J5zt4us                                                        
+185| weird history              https://youtu.be/o-uIbr-fMqM 606| gaming                     https://youtu.be/-xYEMGHsRvY                                                        
+182| boring history             https://youtu.be/FZoi74AQ-s0 573| short                      https://youtu.be/CNSUPRa-AZY                                                        
+182| sleep stories              https://youtu.be/hbQwgDYObDM 536| meme                       https://youtu.be/N-94iqbFHKc                                                        
+182| fall asleep fast           https://youtu.be/JCaQcYTj_v4 437| #shorts                    https://youtu.be/GV56ZGYtQ18                                                        
+182| sleep video                https://youtu.be/K3SrIlZ1vpc 417| animation                  https://youtu.be/b57bE1V-2bY                                                        
+182| rain sounds for sleep      https://youtu.be/j1Pvnw2Yc8w 392| youtube shorts             https://youtu.be/zBIHfB0E9M8                                                        
+182| stories for sleep          https://youtu.be/HX9fAxjZSmo 372| maker                      https://youtu.be/YaqJginb4go                                                        
+182| bedtime stories            https://youtu.be/vE2iXU7kpxE 370| diy                        https://youtu.be/yPWB32FnhZs                                                        
+182| bedtime story              https://youtu.be/LuTIA9xUuPc 362| how to                     https://youtu.be/iSLjbDrM5rY                                                        
+182| boring history for sleep   https://youtu.be/-vgFeVeg2TE 361| darkviperau                https://youtu.be/ldcC-fk1bLQ                                                        
+182| learn history while you sl https://youtu.be/RLZ8zxgtwbI 361| trending                   https://youtu.be/dyJGYcUdvmM                                                        
+172| christianity               https://youtu.be/aMMr51l8Dxs 353| Funny                      https://youtu.be/DYp3Cp3c0Io                                                        
+170| christian                  https://youtu.be/JKhkFRrS-jQ 346| darkviper                  https://youtu.be/WU3eJe79fuw                                                        
+168| church                     https://youtu.be/v1Dx50ReNXc 345| twitch                     https://youtu.be/UyT095yczf4                                                        
+
+
+Top 25 categories values by media_type
+
+**no category**                                        short                                                  video                                                  
+1764| Entertainment              https://youtu.be/Bzj7u4Q5GG0 22491| People & Blogs             https://youtu.be/U3gMbe9OlvA 12373| **no category**            https://youtu.be/SQ6DnO2u-zg
+1652| Music                      https://youtu.be/9f5zD7ZSNpQ 14629| Entertainment              https://youtu.be/Zf_UYSifX7w                                                        
+1551| **no category**            https://youtu.be/d7zmHM5nRWg 7993| Gaming                     https://youtu.be/HTBX2o1HaTg                                                        
+1267| Science & Technology       https://youtu.be/jD9n01Mck0Q 6575| Comedy                     https://youtu.be/c10cbD1zoSY                                                        
+1167| Education                  https://youtu.be/yGVX0Z5XWNg 5562| Science & Technology       https://youtu.be/ahVqKMKoVnM                                                        
+1095| People & Blogs             https://youtu.be/TlWML0MP9KQ 4614| Education                  https://youtu.be/C0VSXH7s8F4                                                        
+750| Gaming                     https://youtu.be/YQszhPRivd4 4535| Howto & Style              https://youtu.be/DE-VM_Jjw9o                                                        
+575| Comedy                     https://youtu.be/PxXYNigmcCM 4333| Sports                     https://youtu.be/B-HaiIpV0lc                                                        
+521| News & Politics            https://youtu.be/rK0De210TBQ 4105| Music                      https://youtu.be/lWziR2sxoks                                                        
+482| Film & Animation           https://youtu.be/XT8KS4J0gLg 2521| Autos & Vehicles           https://youtu.be/WNhU_bSCaOY                                                        
+261| Howto & Style              https://youtu.be/Q-6PjMHfjBg 2382| Film & Animation           https://youtu.be/vfNfO9st87o                                                        
+181| Travel & Events            https://youtu.be/56nQjJZIqoU 1544| Travel & Events            https://youtu.be/bMpp0LxF1FY                                                        
+174| Sports                     https://youtu.be/8bUuOsIhqBM 1149| Pets & Animals             https://youtu.be/E91LPXxp-QA                                                        
+153| Autos & Vehicles           https://youtu.be/-3HBAvkc4a0 736| News & Politics            https://youtu.be/zt3jXANfS5s                                                        
+78| Pets & Animals             https://youtu.be/kBb4wuGjAwc 74| Nonprofits & Activism      https://youtu.be/dVADBO4-PcM                                                        
+62| Nonprofits & Activism      https://youtu.be/h5snabA1o0Q                                                                                                                
+
+
+Top 25 title_tokens values by media_type
+
+short                                                  video                                                  
+367| official                   https://youtu.be/dO40jln8zgQ 1782| comedy                     https://youtu.be/QF8lumW0-C0
+217| slowed                     https://youtu.be/aKkXEaoSFlw 1285| minecraft                  https://youtu.be/qyaQApk8D04
+216| music                      https://youtu.be/aW7bzd8uwyQ 1208| diy                        https://youtu.be/AS0upw3JZLM
+197| history                    https://youtu.be/-XPnOZYoDUU 984| car                        https://youtu.be/Kdi8yP3QiWA
+187| reverb                     https://youtu.be/PgG80WkPJQI 929| 3d                         https://youtu.be/Cy6izQThqn8
+175| frank                      https://youtu.be/a0sd73YMBk8 846| art                        https://youtu.be/sflG4RCX7SE
+173| ocean                      https://youtu.be/DTvWzOQsHns 820| bro                        https://youtu.be/bPSQnCBQg1s
+172| trump                      https://youtu.be/rvRVpUBTIQA 746| man                        https://youtu.be/Dbm7TGYGSCw
+144| season                     https://youtu.be/EIG1MJze_TI 744| work                       https://youtu.be/7liYCwz6zXI
+143| belief                     https://youtu.be/z5mRC0H61uw 725| world                      https://youtu.be/zTCuMq-7MrU
+143| minecraft                  https://youtu.be/M12CI8Sw93Q 708| memes                      https://youtu.be/L7uBcAhNPmY
+130| episode                    https://youtu.be/BN7fEDbiIuI 691| music                      https://youtu.be/QSQwcq9BSQ4
+126| world                      https://youtu.be/mZOf5_rIfK4 683| gaming                     https://youtu.be/vxL6jN847wE
+126| 3d                         https://youtu.be/alwsRqh5W8M 682| science                    https://youtu.be/JAfveT2hhE4
+125| childish                   https://youtu.be/cp2A0Rp3LjQ 666| making                     https://youtu.be/jcdzl8bXu_g
+125| gambino                    https://youtu.be/H5bjG17DZwU 652| 3dprinting                 https://youtu.be/iEc2ikYItRg
+120| overwatch                  https://youtu.be/ivDAI-FXMH4 642| people                     https://youtu.be/59LFMoySr0o
+116| explained                  https://youtu.be/LW-Jhg0cZsk 606| water                      https://youtu.be/KXTetUWnbiI
+105| review                     https://youtu.be/DFnWeCoVYHA 596| pov                        https://youtu.be/Gk_fI2KyXl8
+102| tiny                       https://youtu.be/Vrk2Q9AZrYI 557| guy                        https://youtu.be/kQpDRawPELw
+102| story                      https://youtu.be/X7x5N4dVd60 552| gym                        https://youtu.be/AsYniaMy75Q
+99| ft                         https://youtu.be/o3mP3mJDL2k 548| lego                       https://youtu.be/6Dd2laV1J40
+96| hd                         https://youtu.be/8bFTRxRWncM 546| home                       https://youtu.be/Sa5bNURNAlY
+95| worst                      https://youtu.be/kC0antZogec 546| overwatch                  https://youtu.be/fxAV0cpSuRc
+92| desk                       https://youtu.be/Vrk2Q9AZrYI 537| gta                        https://youtu.be/sBVNk1GUELQ
