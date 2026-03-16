@@ -339,18 +339,6 @@ category_rename = {
     'Music':'Music & Arts'
 }
 
-# category embeddings from detail/descriptor tokens, key by display name
-# _cat_words = {
-#     key: [w.replace('-', ' ') for w in re.split(r'[^a-zA-Z0-9\-]+', desc) if len(w) > 1]
-#     for key, desc in category_detail.items()
-# }
-# _unique_cat_words = sorted({w for words in _cat_words.values() for w in words})
-# _word_emb_df = encode_cached(cat_m, category_model, _unique_cat_words, None, _unique_cat_words)
-# category_word_embeddings = {
-#     key: np.stack([_word_emb_df.loc[w].values for w in words])
-#     for key, words in _cat_words.items()
-# }
-
 # composed category words embeddings
 _cat_words = {
     key: ' '.join([w.replace('-', ' ') for w in re.split(r'[^a-zA-Z0-9\-]+', desc) if len(w) > 1])
@@ -358,20 +346,6 @@ _cat_words = {
 }
 _word_emb_df = encode_cached(cat_m, category_model, list(_cat_words.values()), None, _cat_words)
 category_word_embeddings = dict(zip(_word_emb_df.index, _word_emb_df.values))
-
-# separate token embeddings (videos)
-# _cmp_words = {
-#     key: [w for w in cmp.split() if len(w) > 1]
-#     for key, cmp in composed.items()
-# }
-# _unique_cmp_words = sorted({w for words in _cmp_words.values() for w in words})
-# _cmp_word_emb_df = encode_cached(cat_m, category_model, _unique_cmp_words, None, _unique_cmp_words)
-# seperate_token_embeddings = {
-#     key: np.stack([_cmp_word_emb_df.loc[w].values for w in words])
-#     for key, words in _cmp_words.items()
-# }
-
-
 
 # For each video, aggregate its tag embeddings and find nearest category
 threshold = 0.05
@@ -386,12 +360,7 @@ for i, original_category in tqdm(categories_clean.items()):
         print(i)
         print('Not found!')
     
-    # Cosine sim to each category: max over per-word similarities
-    # tokens_emb = seperate_token_embeddings.get(i)
-    # norm_vid_emb = np.median(tokens_emb / np.linalg.norm(tokens_emb), axis=0)
-
     norm_vid_emb = composed_emb / np.linalg.norm(composed_emb)
-    # norm_vid_emb = (composed_emb / np.linalg.norm(composed_emb)).median(axis=0) # ! TESTING
 
     sims = {}
     for cat, word_vecs in category_word_embeddings.items():
@@ -410,16 +379,6 @@ for i, original_category in tqdm(categories_clean.items()):
     best_cat = max(sims, key=lambda x: sims.get(x)['score'])
     best_score = sims[best_cat]['score']
     best_cat_detail = sims[best_cat]['word']
-    
-    # Only override if confident enough
-    # print('best_cat', best_cat, 'score', best_score)
-    # print(best_score > threshold)
-    # ordered list of sims with all category best detail word 
-    # print(f'Vid Emb Text: ', composed[i])
-    # print('\n'.join([
-    #     f"{sims[k]['score']:.3f} | {k} ({sims[k]['word']} -> {sims[k]['score']:.3f})"
-    #     for k in sorted(sims, reverse=True, key=lambda x: sims[x]['score'])
-    # ]))
     
     change_cat = (best_score - og_cat_score) > threshold
 
@@ -793,17 +752,6 @@ def plot_circular_chart(
 
 # MARK: UMAP / Cluster
 #%%
-# Get single month sample
-# single_month = watch_data[watch_data['date'].dt.to_period('M') == '2024-04']
-# single_month_ids = single_month['id'].unique().tolist()
-# mask = composed_embeddings.index.isin(single_month_ids)
-# masked_cats = composed_cats.loc[mask] # youtube generated categories
-# masked_cats = composed_cats.loc[mask] # reassigned categories
-
-# PCA before UMAP (from docs: Consider a typical pipeline: high-dimensional embedding (300+) => PCA to reduce to 50 dimensions => UMAP to reduce to 10-20 dimensions => HDBSCAN for clustering / some plain algorithm for classification;)
-# https://umap-learn.readthedocs.io/en/latest/faq.html#the-clusters-are-all-squashed-together-and-i-can-t-see-internal-structure
-
-# Custom transformers
 class PerCategoryUMAPTransformer(BaseEstimator, TransformerMixin):
     def __init__(self, n_neighbors=20, min_dist=0.15, spread=5.0, n_components=2, metric='cosine'):
         self.n_neighbors = n_neighbors
