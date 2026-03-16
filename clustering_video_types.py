@@ -36,10 +36,10 @@ from sentence_transformers import SentenceTransformer
 from sklearn.cluster import HDBSCAN
 from sklearn.preprocessing import normalize
 
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import FunctionTransformer
+from sklearn.preprocessing import FunctionTransformer, OneHotEncoder
 import umap
 
 # nlp
@@ -192,7 +192,7 @@ def add_custom_tags(channel: str, tags_to_add: list):
 add_custom_tags('Zack D. Films', ['entertainment'])
 add_custom_tags('Very Important People', ['comedy'])
 add_custom_tags('JCS - Criminal Psychology', ['documentary'])
-add_custom_tags('Channel 5 with Andrew Callaghan', ['news'])
+# add_custom_tags('Channel 5 with Andrew Callaghan', ['news'])
 add_custom_tags('Adam Savage’s Tested', ['diy'])
 
 tags_cleaned = pd.concat([tag_values, *custom_additions]).groupby(level=0).agg(list)
@@ -236,11 +236,25 @@ categories_clean[add_to_none] = 'None'
 # remove hashtags (included in tags already)
 desc_values = desc.str.replace(r'(\#[\w]+\b)', '', regex=1)
 
-# remove links
-url_regex = r'(https?:\/\/)?(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)'
-desc_values = desc_values.str.replace(url_regex, '', regex=1)
+# take first line only
+desc_line = desc_values.str.split('\n').str[0].explode()
 
-desc_tokens = desc_values.apply(tokenise, number_tokens='drop')
+# drop any lines plugging socials
+follow_strings = '^(subscribe|follow|Learn more|discover|insta|facebook|channel|website|watch here|watch on|click here|buy me|patreon|support|socials|more)'
+desc_line = desc_line[~desc_line.str.contains(follow_strings, case=False)]
+
+# remove links
+url_regex = r'((https?:\/\/)?(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*))'
+desc_line = desc_line.str.replace(url_regex, '', regex=1)
+
+# remove tags
+tag_regex = r'\@[\w\.\-\_]'
+desc_line = desc_line.str.replace(tag_regex, '', regex=1)
+
+# remove empty
+desc_line = desc_line[desc_line != '']
+
+desc_tokens = desc_line.apply(tokenise, number_tokens='drop')
 desc_snippets = desc_tokens.str[:10].str.join(' ')
 
 # desc_token_count = pd.Series(dict(Counter(list(itertools.chain(*desc_tokens.values)))))
@@ -248,13 +262,13 @@ desc_snippets = desc_tokens.str[:10].str.join(' ')
 
 # MARK: Embeddings
 # %%
-# m = 'all-MiniLM-L6-v2' # fast model
+m = 'all-MiniLM-L6-v2' # fast model
 # m = 'all-mpnet-base-v2' #slow model
 # m = 'distilbert-base-nli-mean-tokens'
 import os
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
-m = 'nomic-ai/nomic-embed-text-v1.5'
+# m = 'nomic-ai/nomic-embed-text-v1.5'
 sent_transformer = create_transformer(m)
 
 # ====== Embed on single combined string ======
@@ -263,7 +277,7 @@ _titles_aligned = titles_cleaned.reindex(_combined_idx)
 _tags_aligned = tags_cleaned.reindex(_combined_idx)
 _channels_aligned = channels.reindex(_combined_idx)
 
-snippet_used_counter = defaultdict(int)
+snippet_used_counter = 0
 
 def compose(vid_id, include_tags=True, fill_w_desc=True, min_tokens=10):
     parts = []
@@ -289,25 +303,25 @@ def compose(vid_id, include_tags=True, fill_w_desc=True, min_tokens=10):
             composed = f"{composed} | {snippet}"
     return composed
 
-composed = pd.Series([compose(i) for i in _combined_idx], index=_combined_idx)
+composed = pd.Series([compose(i, min_tokens=10_000) for i in _combined_idx], index=_combined_idx)
 #.sample(round(len(_combined_idx)*0.3), random_state=5) # ! TESTING SAMPLE
 
-# composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'composed_with_desc_and_channel.npy', composed.index)
-# composed_cats = categories.loc[composed.index].copy()
+composed_embeddings = encode_cached(m, sent_transformer, composed.tolist(), 'channel_title_tag_desc_forced.npy', composed.index)
+composed_cats = categories.loc[composed.index].copy()
 
 # MARK: Fix Categories
 # %%
 cat_m = 'all-MiniLM-L6-v2'
-cat_m = 'nomic-ai/nomic-embed-text-v1.5'
+# cat_m = 'nomic-ai/nomic-embed-text-v1.5'
 category_model = create_transformer(cat_m)
 
 category_detail = {
-    'People & Blogs': 'blogs culture job career workplace',
+    'People & Blogs': 'people blogs culture job career workplace',
     'Entertainment': 'entertainment',
     'Gaming': 'gaming overwatch gta minecraft',
     'Comedy': 'comedy skit sketch',
     'Science & Technology': 'science technology biology engineering',
-    'Education': 'education history religion aviation law documentary how-to tutorial',
+    'Education': 'education history religion aviation law documentary how-to tutorial mathematics',
     'Music': 'music art edm',
     'Sports': 'sports football',
     'Film & Animation': 'film animation movie tv',
@@ -326,16 +340,38 @@ category_rename = {
 }
 
 # category embeddings from detail/descriptor tokens, key by display name
+# _cat_words = {
+#     key: [w.replace('-', ' ') for w in re.split(r'[^a-zA-Z0-9\-]+', desc) if len(w) > 1]
+#     for key, desc in category_detail.items()
+# }
+# _unique_cat_words = sorted({w for words in _cat_words.values() for w in words})
+# _word_emb_df = encode_cached(cat_m, category_model, _unique_cat_words, None, _unique_cat_words)
+# category_word_embeddings = {
+#     key: np.stack([_word_emb_df.loc[w].values for w in words])
+#     for key, words in _cat_words.items()
+# }
+
+# composed category words embeddings
 _cat_words = {
-    key: [w.replace('-', ' ') for w in re.split(r'[^a-zA-Z0-9\-]+', desc) if len(w) > 1]
+    key: ' '.join([w.replace('-', ' ') for w in re.split(r'[^a-zA-Z0-9\-]+', desc) if len(w) > 1])
     for key, desc in category_detail.items()
 }
-_unique_cat_words = sorted({w for words in _cat_words.values() for w in words})
-_word_emb_df = encode_cached(cat_m, category_model, _unique_cat_words, None, _unique_cat_words)
-category_word_embeddings = {
-    key: np.stack([_word_emb_df.loc[w].values for w in words])
-    for key, words in _cat_words.items()
-}
+_word_emb_df = encode_cached(cat_m, category_model, list(_cat_words.values()), None, _cat_words)
+category_word_embeddings = dict(zip(_word_emb_df.index, _word_emb_df.values))
+
+# separate token embeddings (videos)
+# _cmp_words = {
+#     key: [w for w in cmp.split() if len(w) > 1]
+#     for key, cmp in composed.items()
+# }
+# _unique_cmp_words = sorted({w for words in _cmp_words.values() for w in words})
+# _cmp_word_emb_df = encode_cached(cat_m, category_model, _unique_cmp_words, None, _unique_cmp_words)
+# seperate_token_embeddings = {
+#     key: np.stack([_cmp_word_emb_df.loc[w].values for w in words])
+#     for key, words in _cmp_words.items()
+# }
+
+
 
 # For each video, aggregate its tag embeddings and find nearest category
 threshold = 0.05
@@ -351,18 +387,23 @@ for i, original_category in tqdm(categories_clean.items()):
         print('Not found!')
     
     # Cosine sim to each category: max over per-word similarities
-    norm_tag = composed_emb / np.linalg.norm(composed_emb)
-    # norm_tag = (single_emb / np.linalg.norm(single_emb)).median(axis=0)
+    # tokens_emb = seperate_token_embeddings.get(i)
+    # norm_vid_emb = np.median(tokens_emb / np.linalg.norm(tokens_emb), axis=0)
+
+    norm_vid_emb = composed_emb / np.linalg.norm(composed_emb)
+    # norm_vid_emb = (composed_emb / np.linalg.norm(composed_emb)).median(axis=0) # ! TESTING
 
     sims = {}
     for cat, word_vecs in category_word_embeddings.items():
-        norm_words = word_vecs / np.linalg.norm(word_vecs, axis=1, keepdims=True)
-        scores = norm_words @ norm_tag
-        best_idx = int(scores.argmax())
+        norm_cat_words = word_vecs / np.linalg.norm(word_vecs, keepdims=True)
+        score = np.dot(norm_cat_words, norm_vid_emb)
+        # best_idx = int(scores.argmax())
         sims[cat] = {
-            'score': float(scores[best_idx]),
-            'word': category_detail[cat].split()[best_idx]
+            'score': score,
+            'word': 'All composed'
         }
+
+
     
     og_cat_score = sims.get(original_category, {'score':0})['score']
 
@@ -384,7 +425,7 @@ for i, original_category in tqdm(categories_clean.items()):
 
     updated_categories.append(
         {'id':i,
-            'og_cat':original_category,
+            'og_cat':category_rename.get(original_category, original_category),
             'og_cat_score':og_cat_score,
             'alt_cat':best_cat,
             'alt_cat_score':best_score,
@@ -407,6 +448,7 @@ def category_change_summary(vid_id_set=None):
         df = adjusted_categories_df[adjusted_categories_df.index.isin(vid_id_set.tolist())].copy()
     else:
         df = adjusted_categories_df.copy()
+        
     
     category_changed = df[df['changed'].fillna(False)]
     print(f'Total Number of categories changed: {len(category_changed):,}')
@@ -442,7 +484,7 @@ selected_mdata['channel'].value_counts().head(25)
 # selected_tags = list(itertools.chain(*tags_cleaned.loc[selected_ids].values))
 # pd.Series(selected_tags).value_counts().head(30)
 
-selected_channel = 'Chris Boden'
+selected_channel = 'Vsauce'
 channel_vid_ids = mdata_nlp[mdata_nlp['channel'] == selected_channel].index
 category_change_summary(channel_vid_ids);
 
@@ -451,17 +493,16 @@ channel_selected_tags = list(itertools.chain(*channel_tags.values))
 pd.Series(channel_selected_tags).value_counts().head(29)
 
 selected_channel_adj_info = adjusted_categories_df.loc[channel_vid_ids]
-selected_channel_adj_info[selected_channel_adj_info['final_cat'] == 'Makers & Hobby']
+selected_channel_adj_info[selected_channel_adj_info['final_cat'] == 'Film & Animation']
 selected_channel_adj_info
 
 # %%
 # print tags per category
-cci = adjusted_categories_df.loc[channel_vid_ids.tolist()].reset_index()
-ids_per_cat = cci.groupby(['final_cat'])['id'].agg(list)
+ids_per_cat = adjusted_categories_df.reset_index().groupby(['final_cat'])['id'].agg(list)
 ids_per_cat.sort_values(key=lambda x: x.apply(len), ascending=False, inplace=True)
 for _cat, ids in ids_per_cat.items():
     print(_cat, ':', len(ids), 'videos')
-    tags_flat = list(itertools.chain(*tags_cleaned.loc[ids].values))
+    tags_flat = list(itertools.chain(*tags_cleaned.loc[[_ for _ in ids if _ in tags_cleaned]].values))
     print(pd.Series(tags_flat).value_counts().head(10))
     print('\n')
 
@@ -795,13 +836,14 @@ class PerCategoryHDBSCAN(BaseEstimator):
     """Runs HDBSCAN per category; cluster size params scale with category size."""
     def __init__(self, min_cluster_size_frac=0.02, min_cluster_size_floor=5,
                  min_samples_frac=0.0001, min_samples_floor=3,
-                 cluster_selection_epsilon=0.0, cluster_selection_method='leaf'):
+                 cluster_selection_epsilon=0.0, cluster_selection_method='leaf', allow_single_cluster=False):
         self.min_cluster_size_frac    = min_cluster_size_frac
         self.min_cluster_size_floor   = min_cluster_size_floor
         self.min_samples_frac         = min_samples_frac
         self.min_samples_floor        = min_samples_floor
         self.cluster_selection_epsilon = cluster_selection_epsilon
         self.cluster_selection_method  = cluster_selection_method
+        self.allow_single_cluster = allow_single_cluster
 
     def _params_for(self, n_points):
         return dict(
@@ -809,6 +851,7 @@ class PerCategoryHDBSCAN(BaseEstimator):
             min_samples=max(self.min_samples_floor, int(n_points * self.min_samples_frac)),
             cluster_selection_epsilon=self.cluster_selection_epsilon,
             cluster_selection_method=self.cluster_selection_method,
+            allow_single_cluster = self.allow_single_cluster,
             metric='euclidean',
             copy=True,
         )
@@ -816,32 +859,41 @@ class PerCategoryHDBSCAN(BaseEstimator):
     def fit_predict(self, X, y):  # y = per-video category Series
         labels = pd.Series(-1, index=X.index, name='sub_label', dtype=int)
         for cat, idx in y.groupby(y).groups.items():
-            pts    = X.loc[idx]
+            pts    = X.loc[idx].dropna()  # skip rows skipped by per-category UMAP
+            if pts.empty:
+                continue
             params = self._params_for(len(pts))
             model  = HDBSCAN(**params)
             if len(pts) < model.min_cluster_size:
                 continue
-            labels.loc[idx] = model.fit_predict(pts)
+            try:
+                labels.loc[pts.index] = model.fit_predict(pts)
+            except TypeError as e:
+                print(e)
+                # epsilon too large for this category, fall back to no epsilon
+                fallback = HDBSCAN(**{**params, 'cluster_selection_epsilon': 0.0})
+                labels.loc[pts.index] = fallback.fit_predict(pts)
         return labels
 
 # Parameters
 
 EMBEDDING_PARAMS = {
     'pca__n_components': 100,
-    'umap__n_neighbors': 150,
-    'umap__min_dist':    1.5,
-    'umap__spread':      5.0,
+    'umap__n_neighbors': 20,
+    'umap__min_dist':    0.05,
+    'umap__spread':      3.0,
     'umap__n_components': 2,
-    'umap__metric':      'cosine',
+    'umap__metric':      'euclidean',
 }
 
 HDBSCAN_PARAMS = {
-    'min_cluster_size_frac':    0.005,
-    'min_cluster_size_floor':   30,
-    'min_samples_frac':         0.001,
-    'min_samples_floor':        80,
-    'cluster_selection_epsilon': 0.0,
-    'cluster_selection_method': 'leaf'
+    'min_cluster_size_frac':    0.0005,
+    'min_cluster_size_floor':   4,
+    'min_samples_frac':         0.002,
+    'min_samples_floor':        7,
+    'cluster_selection_epsilon': 0.2,
+    'allow_single_cluster':True,
+    'cluster_selection_method': 'eom'
 }
 
 # Pipeline
@@ -857,9 +909,17 @@ embedding_pipeline = Pipeline([
 embedding_pipeline.set_params(**EMBEDDING_PARAMS)
 embedding_pipeline.named_steps['pca'].set_output(transform="pandas")
 
+# ohe channel as feature
+ohe = OneHotEncoder()
+svd = TruncatedSVD(n_components=25)
+encoded_channels = ohe.fit_transform(channels.reindex(composed_embeddings.index).values.reshape(-1, 1))
+reduced_channels = svd.fit_transform(encoded_channels)
+
+composed_embeddings_channel_feat = pd.DataFrame(np.hstack([composed_embeddings, reduced_channels]), index=composed_embeddings.index)
+
 print('PCA + Normalise + UMAP...')
-umap_cats = adjusted_categories.loc[composed_embeddings.index].copy()
-umap_embeddings = embedding_pipeline.fit_transform(composed_embeddings, y=umap_cats)
+umap_cats = adjusted_categories.loc[composed_embeddings_channel_feat.index].copy()
+umap_embeddings = embedding_pipeline.fit_transform(composed_embeddings_channel_feat, y=umap_cats)
 print('PCA + Normalise + UMAP ✔')
 
 print('HDBSCAN...')
@@ -889,7 +949,7 @@ selected_cat_index = umap_cats[umap_cats==selected_cat].index
 
 category_sample = sub_labels.loc[selected_cat_index].to_frame()
 category_sample['channel'] = category_sample.index.map(mdata_nlp['channel'])
-print(f'{selected_cat} cluster: ')
+print(f'{selected_cat} category: {category_sample['sub_label'].nunique()} sub-clusters')
 print_out = (
     category_sample
     .reset_index()
@@ -911,16 +971,19 @@ for i, row in print_out.sort_values('index', ascending=False).iterrows():
 #MARK: Inspection 
 inspect_index = {}
 
-selected_cat = 'Autos & Vehicles'
+selected_media = 'short'
+# inspect_index['media_type'] = mdata_nlp[mdata_nlp['media_type']==selected_media].index
+
+selected_cat = 'Music & Arts'
 inspect_index['category'] = umap_cats[umap_cats==selected_cat].index
 
 # Select a sub-cluster
-selected_sub_cluster = 35
-# inspect_index['subcluster'] = sub_labels[sub_labels == selected_sub_cluster].index
+selected_sub_cluster = 86
+inspect_index['subcluster'] = sub_labels[sub_labels == selected_sub_cluster].index
 
 # select a channel
-selected_channel = 'Vsauce'
-inspect_index['channel'] = channels[channels == selected_channel].index
+selected_channel = 'SciManDan'
+# inspect_index['channel'] = channels[channels == selected_channel].index
 
 inspect_union = list(set.intersection(*[set(v) for v in inspect_index.values()]))
 s_df = umap_embeddings.loc[inspect_union].copy()
@@ -933,6 +996,9 @@ s_watch_data['tags'] = s_watch_data['id'].map(mdata_nlp['tags'])
 s_watch_data['categories'] = s_watch_data['id'].map(mdata_nlp['categories'])
 s_watch_data['title'] = s_watch_data['id'].map(mdata_nlp['title'])
 s_watch_data['title_tokens'] = s_watch_data['title'].apply(tokenise, number_tokens='drop')
+
+print(f'Showing: {sub_labels.loc[inspect_union].nunique()} clusters')
+print(sub_labels.loc[inspect_union].value_counts().head(5))
 
 for k, v in inspect_index.items():
     print(f'{k}: {len(v)} videos')
