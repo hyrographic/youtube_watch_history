@@ -316,7 +316,7 @@ cat_m = 'all-MiniLM-L6-v2'
 category_model = create_transformer(cat_m)
 
 category_detail = {
-    'People & Blogs': 'people blogs culture job career workplace',
+    'People & Blogs': 'blogs culture job career workplace',
     'Entertainment': 'entertainment',
     'Gaming': 'gaming overwatch gta minecraft',
     'Comedy': 'comedy skit sketch',
@@ -339,16 +339,20 @@ category_rename = {
     'Music':'Music & Arts'
 }
 
-# composed category words embeddings
+# category embeddings from detail/descriptor tokens, key by display name
 _cat_words = {
-    key: ' '.join([w.replace('-', ' ') for w in re.split(r'[^a-zA-Z0-9\-]+', desc) if len(w) > 1])
+    key: [w.replace('-', ' ') for w in re.split(r'[^a-zA-Z0-9\-]+', desc) if len(w) > 1]
     for key, desc in category_detail.items()
 }
-_word_emb_df = encode_cached(cat_m, category_model, list(_cat_words.values()), None, _cat_words)
-category_word_embeddings = dict(zip(_word_emb_df.index, _word_emb_df.values))
+_unique_cat_words = sorted({w for words in _cat_words.values() for w in words})
+_word_emb_df = encode_cached(cat_m, category_model, _unique_cat_words, None, _unique_cat_words)
+category_word_embeddings = {
+    key: np.stack([_word_emb_df.loc[w].values for w in words])
+    for key, words in _cat_words.items()
+}
 
 # For each video, aggregate its tag embeddings and find nearest category
-threshold = 0.05
+threshold = 0.15
 updated_categories = []
 for i, original_category in tqdm(categories_clean.items()):
     if isinstance(original_category, list):
@@ -364,16 +368,19 @@ for i, original_category in tqdm(categories_clean.items()):
 
     sims = {}
     for cat, word_vecs in category_word_embeddings.items():
-        norm_cat_words = word_vecs / np.linalg.norm(word_vecs, keepdims=True)
-        score = np.dot(norm_cat_words, norm_vid_emb)
-        # best_idx = int(scores.argmax())
+        norm_words = word_vecs / np.linalg.norm(word_vecs, axis=1, keepdims=True)
+        scores = norm_words @ norm_vid_emb
+        best_idx = int(scores.argmax())
         sims[cat] = {
-            'score': score,
-            'word': 'All composed'
+            'score': float(scores[best_idx]),
+            'word': category_detail[cat].split()[best_idx]
         }
 
+    # print('\n'.join([
+    #     f"{sims[k]['score']:.3f} | {k} ({sims[k]['word']} -> {sims[k]['score']:.3f})"
+    #     for k in sorted(sims, reverse=True, key=lambda x: sims[x]['score'])
+    # ]))
 
-    
     og_cat_score = sims.get(original_category, {'score':0})['score']
 
     best_cat = max(sims, key=lambda x: sims.get(x)['score'])
@@ -433,7 +440,7 @@ category_change_summary();
 
 #%%
 # find random channels and tags
-c1 = adjusted_categories_df['og_cat'] == 'Film & Animation'
+c1 = adjusted_categories_df['og_cat'] == 'People & Blogs'
 c2 = adjusted_categories_df['alt_cat'] == 'Education'
 selected_ids = adjusted_categories_df[c1 & c2].index.tolist()
 selected_mdata = mdata_nlp[mdata_nlp.index.isin(selected_ids)]
@@ -443,7 +450,7 @@ selected_mdata['channel'].value_counts().head(25)
 # selected_tags = list(itertools.chain(*tags_cleaned.loc[selected_ids].values))
 # pd.Series(selected_tags).value_counts().head(30)
 
-selected_channel = 'Vsauce'
+selected_channel = 'Sleepless Historian'
 channel_vid_ids = mdata_nlp[mdata_nlp['channel'] == selected_channel].index
 category_change_summary(channel_vid_ids);
 
@@ -892,7 +899,7 @@ def sample_links(ids, n=2):
     return '  '.join(f'https://youtube.com/watch?v={i}' for i in sampled)
 
 # Select a category
-selected_cat = 'Music & Arts'
+selected_cat = 'People & Blogs'
 selected_cat_index = umap_cats[umap_cats==selected_cat].index
 
 category_sample = sub_labels.loc[selected_cat_index].to_frame()
@@ -922,11 +929,11 @@ inspect_index = {}
 selected_media = 'short'
 # inspect_index['media_type'] = mdata_nlp[mdata_nlp['media_type']==selected_media].index
 
-selected_cat = 'Music & Arts'
+selected_cat = 'People & Blogs'
 inspect_index['category'] = umap_cats[umap_cats==selected_cat].index
 
 # Select a sub-cluster
-selected_sub_cluster = 86
+selected_sub_cluster = 2
 inspect_index['subcluster'] = sub_labels[sub_labels == selected_sub_cluster].index
 
 # select a channel
