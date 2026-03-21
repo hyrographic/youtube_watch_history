@@ -227,7 +227,8 @@ titles_cleaned = title_tokens.groupby(level=0).agg(lambda x: ' '.join(x)).reinde
 categories_clean = categories.str.title().str.strip()
 # removes category entirely - ignored during reassignment as replaced with None
 remove_categories = [
-    'Nonprofits & Activism'
+    'Nonprofits & Activism',
+    'Howto & Style'
 ]
 add_to_none = categories_clean.isin(remove_categories)
 categories_clean[add_to_none] = 'None'
@@ -865,12 +866,12 @@ embedding_pipeline.set_params(**EMBEDDING_PARAMS)
 embedding_pipeline.named_steps['pca'].set_output(transform="pandas")
 
 # ohe channel as feature
-ohe = OneHotEncoder()
-svd = TruncatedSVD(n_components=25)
-encoded_channels = ohe.fit_transform(channels.reindex(composed_embeddings.index).values.reshape(-1, 1))
-reduced_channels = svd.fit_transform(encoded_channels)
+# ohe = OneHotEncoder()
+# svd = TruncatedSVD(n_components=25)
+# encoded_channels = ohe.fit_transform(channels.reindex(composed_embeddings.index).values.reshape(-1, 1))
+# reduced_channels = svd.fit_transform(encoded_channels)
 
-composed_embeddings_channel_feat = pd.DataFrame(np.hstack([composed_embeddings, reduced_channels]), index=composed_embeddings.index)
+# composed_embeddings_channel_feat = pd.DataFrame(np.hstack([composed_embeddings, reduced_channels]), index=composed_embeddings.index)
 
 print('PCA + Normalise + UMAP...')
 umap_cats = adjusted_categories.loc[composed_embeddings_channel_feat.index].copy()
@@ -882,12 +883,18 @@ hdbscan_model = PerCategoryHDBSCAN(**HDBSCAN_PARAMS)
 sub_labels = hdbscan_model.fit_predict(umap_embeddings, y=umap_cats)
 print('HDBSCAN ✔')
 
+# remove uncategorised samples
+uncat_sample_ids = umap_cats[umap_cats=='None'].index
+plot_watch_data = watch_data.drop(index=watch_data[watch_data['id'].isin(uncat_sample_ids)].index)
+plot_embeddings = umap_embeddings.drop(index=umap_embeddings[umap_embeddings.index.isin(uncat_sample_ids)].index)
+plot_sub_labels = sub_labels.drop(index=sub_labels[sub_labels.index.isin(uncat_sample_ids)].index)
+
 # draw plot
 COLOR_BY   = 'subcluster'
 SHAPE_MODE = True
 
 fig, coords_df, umap_colors, shape_marker, cat_order, cat_angles, cat_colours = plot_circular_chart(
-    umap_embeddings, umap_cats, sub_labels, watch_data,
+    plot_embeddings, umap_cats[umap_cats!='None'], plot_sub_labels, plot_watch_data,
     color_by=COLOR_BY, shape_mode=SHAPE_MODE,
     save_path=f"charts/dev_samples/Development Sample ({round(len(umap_embeddings)/1000, 1)}k) {datetime.today().strftime('%d-%b %H')}.svg",
 )
@@ -899,7 +906,7 @@ def sample_links(ids, n=2):
     return '  '.join(f'https://youtube.com/watch?v={i}' for i in sampled)
 
 # Select a category
-selected_cat = 'People & Blogs'
+selected_cat = 'Education'
 selected_cat_index = umap_cats[umap_cats==selected_cat].index
 
 category_sample = sub_labels.loc[selected_cat_index].to_frame()
@@ -929,15 +936,15 @@ inspect_index = {}
 selected_media = 'short'
 # inspect_index['media_type'] = mdata_nlp[mdata_nlp['media_type']==selected_media].index
 
-selected_cat = 'People & Blogs'
+selected_cat = 'Education'
 inspect_index['category'] = umap_cats[umap_cats==selected_cat].index
 
 # Select a sub-cluster
-selected_sub_cluster = 2
+selected_sub_cluster = 0
 inspect_index['subcluster'] = sub_labels[sub_labels == selected_sub_cluster].index
 
 # select a channel
-selected_channel = 'SciManDan'
+selected_channel = 'DarkViperAU'
 # inspect_index['channel'] = channels[channels == selected_channel].index
 
 inspect_union = list(set.intersection(*[set(v) for v in inspect_index.values()]))
@@ -1083,39 +1090,42 @@ from animation_rendering import UMAPAnimationRenderer
 renderer = UMAPAnimationRenderer(
     fps=30,
     seconds_per_day=0.2,
-    window_size=15,
+    window_size=7,
     glow_size=1,
     scale_by_duration=True,
-    duration_min_size=7,
-    duration_max_size=13,
+    duration_min_size=1,
+    duration_max_size=8,
     core_point_size=2,
-    glow_layers=UMAPAnimationRenderer().make_glow_layers(n_rings=6, max_size=7, max_alpha=0.2)
+    glow_layers=UMAPAnimationRenderer().make_glow_layers(n_rings=6, max_size=7, max_alpha=0.1)
 )
-
+# plot_watch_data
+# plot_embeddings
+# plot_sub_labels
 # ── Pre-compute shared inputs ──────────────────────────────────────────────────
-coords_df, cat_order, cat_angles, _ = renderer.compute_circular_layout(umap_embeddings, umap_cats)
+coords_df, cat_order, cat_angles, _ = renderer.compute_circular_layout(plot_embeddings, umap_cats)
 
-colors_series   = pd.Series(umap_colors, index=umap_embeddings.index)
-is_noise        = (sub_labels == -1)
+colors_series   = pd.Series(umap_colors, index=plot_embeddings.index)
+is_noise        = (plot_sub_labels == -1)
 duration_series = pd.Series(
-    umap_embeddings.index.map(mdata_nlp['duration']),
-    index=umap_embeddings.index,
+    plot_embeddings.index.map(mdata_nlp['duration']),
+    index=plot_embeddings.index,
 )
 
-video_ids = mdata_nlp[mdata_nlp['media_type'] == 'video'].index
-render_range = watch_data[
-    (watch_data['date'].dt.to_period('D') >= '2025-01-01') &
-    (watch_data['date'].dt.to_period('D') <= '2025-03-01') &
-    (watch_data['id'].isin(video_ids))
-].copy()
-render_range = render_range[render_range['id'].isin(umap_embeddings.index)]
+# video_ids = mdata_nlp[mdata_nlp['media_type'] == 'video'].index
+# render_range = plot_watch_data[
+#     (plot_watch_data['date'].dt.to_period('D') >= '2025-01-01') &
+#     (plot_watch_data['date'].dt.to_period('D') <= '2025-03-01') &
+#     (plot_watch_data['id'].isin(video_ids))
+# ].copy()
+# render_range = render_range[render_range['id'].isin(plot_embeddings.index)]
+render_range = plot_watch_data.copy()
 
 # ── Quick single-frame preview ─────────────────────────────────────────────────
 renderer.sample_frame(
     render_range, coords_df, colors_series, is_noise,
-    day_idx=72,
+    day_idx=1150,
     save_path='charts/sample_frame.svg',
-    marker_series=sub_labels,
+    marker_series=plot_sub_labels,
     shape_marker=shape_marker,
     duration_series=duration_series,
     cat_colours=cat_colours,
@@ -1125,15 +1135,14 @@ renderer.sample_frame(
 
 renderer.frame_to_date(72)
 # %%
-
 #MARK: Full Render
 renderer.render(
-    df=render_range,
+    df=plot_watch_data,
     coords_df=coords_df,
     colors_series=colors_series,
     is_noise_series=is_noise,
-    output_dir='charts/frames_v13',
-    marker_series=sub_labels,
+    output_dir='charts/frames_90k',
+    marker_series=plot_sub_labels,
     shape_marker=shape_marker,
     duration_series=duration_series,
     cat_colours=cat_colours,
