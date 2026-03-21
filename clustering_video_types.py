@@ -837,7 +837,7 @@ EMBEDDING_PARAMS = {
     'pca__n_components': 100,
     'umap__n_neighbors': 20,
     'umap__min_dist':    0.05,
-    'umap__spread':      3.0,
+    'umap__spread':      5.0,
     'umap__n_components': 2,
     'umap__metric':      'euclidean',
 }
@@ -1088,15 +1088,20 @@ reload(animation_rendering)
 from animation_rendering import UMAPAnimationRenderer
 
 renderer = UMAPAnimationRenderer(
+    figsize=(19.2*2, 10.8*2),
     fps=30,
-    seconds_per_day=0.2,
-    window_size=7,
-    glow_size=1,
+    seconds_per_day=0.1,
+    window_size=30,
     scale_by_duration=True,
-    duration_min_size=1,
-    duration_max_size=8,
-    core_point_size=2,
-    glow_layers=UMAPAnimationRenderer().make_glow_layers(n_rings=6, max_size=7, max_alpha=0.1)
+    point_min=45.0,
+    point_max=55.0,
+    noise_min=25.0,
+    noise_max=25.0,
+    glow_layers=UMAPAnimationRenderer().make_glow_layers(
+        n_rings=5,
+        max_size=4, # this is a multiplier!
+        max_alpha=0.15
+        )
 )
 # plot_watch_data
 # plot_embeddings
@@ -1123,8 +1128,8 @@ render_range = plot_watch_data.copy()
 # ── Quick single-frame preview ─────────────────────────────────────────────────
 renderer.sample_frame(
     render_range, coords_df, colors_series, is_noise,
-    day_idx=1150,
-    save_path='charts/sample_frame.svg',
+    day_idx=0,
+    save_path='charts/sample_frame.png',
     marker_series=plot_sub_labels,
     shape_marker=shape_marker,
     duration_series=duration_series,
@@ -1141,7 +1146,7 @@ renderer.render(
     coords_df=coords_df,
     colors_series=colors_series,
     is_noise_series=is_noise,
-    output_dir='charts/frames_90k',
+    output_dir='charts/frames_90k_v2',
     marker_series=plot_sub_labels,
     shape_marker=shape_marker,
     duration_series=duration_series,

@@ -40,8 +40,8 @@ class UMAPAnimationRenderer:
         Parameters
         ----------
         n_rings   : int   — number of concentric glow rings
-        max_size  : float — scatter marker size of the outermost (faintest) ring
-        min_size  : float — scatter marker size of the innermost (brightest) ring
+        max_size  : float — outermost ring size as a multiplier of point_min (e.g. 10 = 10× core)
+        min_size  : float — innermost ring size as a multiplier of point_min
         min_alpha : float — alpha of the outermost ring
         max_alpha : float — alpha of the innermost ring
         """
@@ -57,10 +57,10 @@ class UMAPAnimationRenderer:
         seconds_per_day: float = 0.2,
         # ── Trail window sizes ─────────────────────────────────────────────────
         window_size: int = 7,               # days cluster points remain visible
-        noise_window_multiplier: int = 4,   # noise window = window_size × noise_window_multiplier
+        noise_window_multiplier: int = 1,   # noise window = window_size × noise_window_multiplier
         # ── Figure layout ─────────────────────────────────────────────────────
         figsize: tuple = (19.2, 10.8),
-        dpi: int = 200,
+        dpi: int = 300,
         # ── Circular chart viewport ───────────────────────────────────────────
         chart_limit: float = 1.35,          # axis range: [-chart_limit, chart_limit]
         show_circle: bool = True,           # draw faint unit-circle boundary
@@ -69,21 +69,21 @@ class UMAPAnimationRenderer:
         # ── Shape mode ────────────────────────────────────────────────────────
         shape_mode: bool = True,            # True → use shape_marker for each scatter pass
         # ── Glow effect ───────────────────────────────────────────────────────
-        glow_size: float = 1.0,             # global scale multiplier for all glow sizes
-        glow_layers: list = None,           # list of (size, alpha) tuples; None = DEFAULT_GLOW_LAYERS
-        core_point_size: float = 2,      # solid dot drawn on top of glow rings
+        glow_layers: list = None,           # list of (size, alpha) tuples; None = make_glow_layers()
+        # ── Cluster point sizing ──────────────────────────────────────────────
+        point_min: float = 2.0,             # fixed size (or min when scale_by_duration=True)
+        point_max: float = 5.0,             # max size when scale_by_duration=True
         # ── Cluster alpha decay ───────────────────────────────────────────────
         cluster_alpha_decay: float = 2.0,   # power > 1 → fast initial drop, flatter tail
         # ── Noise point styling ───────────────────────────────────────────────
-        noise_point_size: float = 0.5,
+        noise_min: float = 0.5,             # fixed size (or min when scale_by_duration=True)
+        noise_max: float = 0.5,             # max size when scale_by_duration=True
         noise_base_alpha: float = 0.45,     # max alpha for noise points (dim background)
-        noise_alpha_decay: float = 0.4,     # power < 1 → slow decay (noise lingers)
+        noise_alpha_decay: float = 0.75,     # power < 1 → slow decay (noise lingers)
         noise_color: str = 'grey',
         noise_fallback_color: tuple = (0.6, 0.6, 0.6, 1.0),
         # ── Duration-based point scaling ──────────────────────────────────────
         scale_by_duration: bool = False,
-        duration_min_size: float = 0.5,
-        duration_max_size: float = 5.0,
     ):
         # ── Timing ────────────────────────────────────────────────────────────
         self.fps = fps
@@ -107,30 +107,32 @@ class UMAPAnimationRenderer:
         self.shape_mode  = shape_mode
 
         # ── Glow effect ───────────────────────────────────────────────────────
-        self.glow_size = glow_size
+        # Sizes in glow_layers are multipliers of point_min, so glow scales with the core dot.
         raw_layers = glow_layers if glow_layers is not None else self.make_glow_layers()
-        self._glow_layers = [(s * glow_size, a) for s, a in raw_layers]
-        self._core_point_size = core_point_size * glow_size
+        self._glow_layers = [(s * point_min, a) for s, a in raw_layers]
+
+        # ── Cluster sizing ────────────────────────────────────────────────────
+        self.point_min = point_min
+        self.point_max = point_max
 
         # ── Alpha decay ───────────────────────────────────────────────────────
         self.cluster_alpha_decay = cluster_alpha_decay
 
         # ── Noise styling ─────────────────────────────────────────────────────
-        self.noise_point_size    = noise_point_size
+        self.noise_min           = noise_min
+        self.noise_max           = noise_max
         self.noise_base_alpha    = noise_base_alpha
         self.noise_alpha_decay   = noise_alpha_decay
         self.noise_color         = noise_color
         self.noise_fallback_color = noise_fallback_color
-        self.scale_by_duration = scale_by_duration
-        self.duration_min_size = duration_min_size
-        self.duration_max_size = duration_max_size
+        self.scale_by_duration   = scale_by_duration
 
         # ── Internal state ────────────────────────────────────────────────────
         self.fig = None
         self.ax  = None
         self._days            = None  # list[Period]
         self._day_ordered_ids = None  # list[list[str]]
-        self._day_umap_data   = None  # list[(coords_sub, colors, noise, sizes, markers)]
+        self._day_umap_data   = None  # list[(coords_sub, colors, noise, cluster_sizes, noise_sizes, markers)]
         self._shape_marker    = None  # dict: shape_value → marker char, set in _setup_figure
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -273,8 +275,10 @@ class UMAPAnimationRenderer:
         self._day_ordered_ids = []
         self._day_umap_data   = []
 
-        _dur_sizes = (self._compute_duration_sizes(duration_series)
-                      if self.scale_by_duration and duration_series is not None else None)
+        _cluster_sizes = (self._compute_duration_sizes(duration_series, self.point_min, self.point_max)
+                          if self.scale_by_duration and duration_series is not None else None)
+        _noise_sizes   = (self._compute_duration_sizes(duration_series, self.noise_min, self.noise_max)
+                          if self.scale_by_duration and duration_series is not None else None)
 
         for day in tqdm(self._days, desc='Pre-caching days'):
             day_df = df[df['date'].dt.to_period('D') == day].sort_values('date')
@@ -287,20 +291,23 @@ class UMAPAnimationRenderer:
             self._day_ordered_ids.append(ordered)
 
             if ordered:
-                coords_sub = coords_df.loc[ordered]
-                noise      = is_noise_series.reindex(ordered).fillna(True).values.astype(bool)
-                colors     = np.array([colors_series[v] for v in ordered], dtype=float)
-                markers    = marker_series.reindex(ordered).values if marker_series is not None else None
-                sizes      = (_dur_sizes.reindex(ordered).fillna(self.duration_min_size).values
-                              if _dur_sizes is not None else None)
+                coords_sub    = coords_df.loc[ordered]
+                noise         = is_noise_series.reindex(ordered).fillna(True).values.astype(bool)
+                colors        = np.array([colors_series[v] for v in ordered], dtype=float)
+                markers       = marker_series.reindex(ordered).values if marker_series is not None else None
+                cluster_sizes = (_cluster_sizes.reindex(ordered).fillna(self.point_min).values
+                                 if _cluster_sizes is not None else None)
+                noise_sizes   = (_noise_sizes.reindex(ordered).fillna(self.noise_min).values
+                                 if _noise_sizes is not None else None)
             else:
-                coords_sub = coords_df.iloc[:0]
-                noise      = np.empty(0, dtype=bool)
-                colors     = np.empty((0, 3), dtype=float)
-                markers    = np.empty(0, dtype=object) if marker_series is not None else None
-                sizes      = np.empty(0) if _dur_sizes is not None else None
+                coords_sub    = coords_df.iloc[:0]
+                noise         = np.empty(0, dtype=bool)
+                colors        = np.empty((0, 3), dtype=float)
+                markers       = np.empty(0, dtype=object) if marker_series is not None else None
+                cluster_sizes = np.empty(0) if _cluster_sizes is not None else None
+                noise_sizes   = np.empty(0) if _noise_sizes is not None else None
 
-            self._day_umap_data.append((coords_sub, colors, noise, sizes, markers))
+            self._day_umap_data.append((coords_sub, colors, noise, cluster_sizes, noise_sizes, markers))
 
     # ──────────────────────────────────────────────────────────────────────────
     # Alpha decay functions
@@ -326,13 +333,15 @@ class UMAPAnimationRenderer:
     # Duration size scaling
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _compute_duration_sizes(self, duration_series):
+    def _compute_duration_sizes(self, duration_series, min_size: float, max_size: float):
         """
         Map video durations to point sizes via a sigmoid on log-duration.
 
         Parameters
         ----------
         duration_series : Series  (index=video_id, values=duration in seconds)
+        min_size        : float   — size at the minimum end of the sigmoid
+        max_size        : float   — size at the maximum end of the sigmoid
         """
         dur = pd.to_numeric(duration_series, errors='coerce')
         median = dur.median()
@@ -348,7 +357,7 @@ class UMAPAnimationRenderer:
 
         k   = 0.8 / log_std
         sig = 1.0 / (1.0 + np.exp(-k * (log_dur - log_med)))
-        sizes = self.duration_min_size + (self.duration_max_size - self.duration_min_size) * sig
+        sizes = min_size + (max_size - min_size) * sig
         return pd.Series(sizes, index=duration_series.index)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -381,13 +390,13 @@ class UMAPAnimationRenderer:
             if alpha <= 0:
                 continue
 
-            coords_sub, colors, noise, sizes, _ = self._day_umap_data[d_idx]
+            coords_sub, colors, noise, cluster_sizes, noise_sizes, _ = self._day_umap_data[d_idx]
             n = n_visible if d_idx == day_idx else len(coords_sub)
             if n == 0 or not noise[:n].any():
                 continue
 
             nm = noise[:n]
-            noise_s = sizes[:n][nm] if (self.scale_by_duration and sizes is not None) else self.noise_point_size
+            noise_s = noise_sizes[:n][nm] if (self.scale_by_duration and noise_sizes is not None) else self.noise_min
             self.ax.scatter(
                 coords_sub[0].values[:n][nm],
                 coords_sub[1].values[:n][nm],
@@ -402,7 +411,7 @@ class UMAPAnimationRenderer:
             if alpha <= 0:
                 continue
 
-            coords_sub, colors, noise, sizes, markers = self._day_umap_data[d_idx]
+            coords_sub, colors, noise, cluster_sizes, noise_sizes, markers = self._day_umap_data[d_idx]
             n = n_visible if d_idx == day_idx else len(coords_sub)
             non_noise = ~noise[:n]
             if n == 0 or not non_noise.any():
@@ -412,10 +421,10 @@ class UMAPAnimationRenderer:
             yu = coords_sub[1].values[:n][non_noise]
             pc = colors[:n][non_noise]
 
-            cluster_s = (sizes[:n][non_noise]
-                         if (self.scale_by_duration and sizes is not None)
-                         else self._core_point_size)
-            scale = cluster_s / self._core_point_size
+            cluster_s = (cluster_sizes[:n][non_noise]
+                         if (self.scale_by_duration and cluster_sizes is not None)
+                         else self.point_min)
+            scale = cluster_s / self.point_min
 
             if self.shape_mode and markers is not None and self._shape_marker is not None:
                 # Per-marker scatter so each shape is rendered with the correct glyph
@@ -425,7 +434,7 @@ class UMAPAnimationRenderer:
                     ms_scale    = self.MARKER_SIZE_SCALES.get(marker_char, 1.0)
                     mm = mvals == mval
                     cs = (cluster_s[mm] if np.ndim(cluster_s) > 0 else cluster_s) * ms_scale
-                    sc = cs / self._core_point_size
+                    sc = cs / self.point_min
 
                     # Glow rings (outermost → innermost)
                     for size, ring_alpha in self._glow_layers:
@@ -508,7 +517,7 @@ class UMAPAnimationRenderer:
             for f in range(self.frames_per_day):
                 n_visible = round((f + 1) / self.frames_per_day * n_today)
                 self._draw_frame(day_idx, n_visible)
-                self.fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.svg', transparent=True)
+                self.fig.savefig(f'{output_dir}/frame_{frame_idx:05d}.png', transparent=True, dpi=self.dpi)
                 frame_idx += 1
             print(f'Rendered {day} ({frame_idx} frames total)')
 
